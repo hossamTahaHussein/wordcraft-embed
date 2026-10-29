@@ -1,0 +1,5 @@
+node_modules/
+editor/
+examples/files/
+.wordcraft-web-*/
+.playwright-mcp/

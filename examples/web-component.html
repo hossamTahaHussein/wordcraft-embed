@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WordCraft web component</title>
+  <script type="module" src="/sdk/wordcraft-embed.js"></script>
+  <style>
+    body { margin: 0; font: 14px system-ui, sans-serif; }
+    p { margin: 8px 16px; }
+    wordcraft-editor { height: calc(100vh - 40px); }
+  </style>
+</head>
+<body>
+  <p id="status">The smallest integration: one tag. Ctrl+S downloads the file here.</p>
+
+  <wordcraft-editor src="/wordcraft/" document="/blank.docx" document-name="Letter.docx" author="Guest"></wordcraft-editor>
+
+  <script type="module">
+    const editor = document.querySelector('wordcraft-editor');
+    const status = document.querySelector('#status');
+    editor.addEventListener('wordcraft-ready', (e) => (status.textContent = `WordCraft ${e.detail.version} ready`));
+    editor.addEventListener('wordcraft-dirty', (e) => (status.textContent = e.detail.dirty ? 'Unsaved changes' : 'Saved'));
+    editor.addEventListener('wordcraft-error', (e) => (status.textContent = e.detail.error.message));
+    // Without a handler, saved files would go nowhere: hand them to the browser as a download.
+    editor.addEventListener('wordcraft-save', (e) => {
+      const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(e.detail.blob), download: e.detail.name });
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(link.href), 10_000);
+    });
+  </script>
+</body>
+</html>

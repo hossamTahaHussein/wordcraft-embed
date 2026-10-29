@@ -1,0 +1,26 @@
+{
+  "name": "wordcraft-embed",
+  "version": "0.1.0",
+  "description": "Embed the WordCraft word processor (open .docx, edit, save) in any web page",
+  "type": "module",
+  "main": "src/wordcraft-embed.js",
+  "module": "src/wordcraft-embed.js",
+  "types": "src/wordcraft-embed.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/wordcraft-embed.d.ts",
+      "default": "./src/wordcraft-embed.js"
+    }
+  },
+  "files": ["src", "scripts", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "wordcraftVersion": "0.12.0",
+  "scripts": {
+    "fetch-editor": "node scripts/fetch-editor.mjs",
+    "start": "node examples/server.mjs"
+  },
+  "keywords": ["word", "docx", "editor", "word-processor", "wordcraft", "embed", "wasm"],
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  }
+}
