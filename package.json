@@ -12,16 +12,33 @@
       "default": "./src/wordcraft-embed.js"
     }
   },
-  "files": ["src", "scripts", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "files": [
+    "src",
+    "scripts",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
   "wordcraftVersion": "0.12.0",
   "scripts": {
     "fetch-editor": "node scripts/fetch-editor.mjs",
     "start": "node examples/server.mjs",
     "test": "node --test 'relay/test/*.test.mjs' 'test/*.test.mjs'"
   },
-  "keywords": ["word", "docx", "editor", "word-processor", "wordcraft", "embed", "wasm"],
+  "keywords": [
+    "word",
+    "docx",
+    "editor",
+    "word-processor",
+    "wordcraft",
+    "embed",
+    "wasm"
+  ],
   "license": "MIT OR Apache-2.0",
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "8.22.0"
   }
 }
