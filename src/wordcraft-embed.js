@@ -560,39 +560,45 @@ export class WordCraftEditorElement extends ElementBase {
   }
 
   open(source, name) {
-    return this.editor.open(source, name);
+    return this._editor().then((editor) => editor.open(source, name));
   }
 
   focus() {
     this.editor?.focus();
   }
 
+  /** The editor, or a rejection while this element isn't in the page. */
+  _editor() {
+    if (this.editor) return Promise.resolve(this.editor);
+    return Promise.reject(new Error('WordCraft: the <wordcraft-editor> element is not in the page'));
+  }
+
   run(command, params) {
-    return this.editor.run(command, params);
+    return this._editor().then((editor) => editor.run(command, params));
   }
 
   getText() {
-    return this.editor.getText();
+    return this._editor().then((editor) => editor.getText());
   }
 
   getDocument(format) {
-    return this.editor.getDocument(format);
+    return this._editor().then((editor) => editor.getDocument(format));
   }
 
   inspect() {
-    return this.editor.inspect();
+    return this._editor().then((editor) => editor.inspect());
   }
 
   insertText(text) {
-    return this.editor.insertText(text);
+    return this._editor().then((editor) => editor.insertText(text));
   }
 
   select(text) {
-    return this.editor.select(text);
+    return this._editor().then((editor) => editor.select(text));
   }
 
   setReadOnly(on) {
-    return this.editor.setReadOnly(on);
+    return this._editor().then((editor) => editor.setReadOnly(on));
   }
 }
 

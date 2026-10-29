@@ -406,3 +406,13 @@ test('co-editing calls wait until the shared document is joined', async () => {
   editor.destroy();
   await assert.rejects(text, /destroyed/);
 });
+
+test('the element refuses calls with a rejected promise before it is connected', async () => {
+  const { WordCraftEditorElement } = await import('../src/wordcraft-embed.js');
+  const element = new WordCraftEditorElement();
+  for (const call of [() => element.getText(), () => element.run('edit.undo'), () => element.open(new Uint8Array(1)), () => element.setReadOnly(true)]) {
+    let result;
+    assert.doesNotThrow(() => { result = call(); });
+    await assert.rejects(result, /not in the page/);
+  }
+});

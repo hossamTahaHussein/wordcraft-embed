@@ -70,8 +70,9 @@
       // The shared document is saved on the server (autosave, Ctrl+S); anything else the editor
       // hands over (File › Export as PDF, Save As another format) is a copy for this person:
       // it downloads, as Download does in Google Docs.
-      onSave: async ({ name: file, blob }) => {
-        if (file !== fileName) {
+      onSave: async ({ name: file, blob, saveAs }) => {
+        // Save As or Export (even as .docx) is this person's copy; Save is the shared document.
+        if (saveAs || file !== fileName) {
           const a = document.createElement('a');
           a.href = URL.createObjectURL(blob);
           a.download = file;

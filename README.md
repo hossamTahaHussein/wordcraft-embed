@@ -149,6 +149,11 @@ Every call returns a promise, waits for `ready`, and rejects with the editor's m
 fails (an unknown command, an edit while read only). In a co-edited document, edits made this
 way sync to everyone like typed ones.
 
+Calls run when the editor draws its next frame, so in a hidden tab (where the browser pauses
+drawing) they wait and may reach `callTimeout`. A call that timed out can still run once the tab
+is shown again: check with `getText()` or `inspect()` before repeating an edit. On a
+`<wordcraft-editor>` element the same calls reject while the element isn't in the page.
+
 | Call | |
 |---|---|
 | `await editor.run(command, params?)` | Run any WordCraft command and get its result, e.g. `run('format.bold', { value: true })`, `run('insert.table', { rows: 2, cols: 3 })` |
@@ -162,7 +167,7 @@ way sync to everyone like typed ones.
 | Event | `event.detail` |
 |---|---|
 | `change` | `{ rev, author }` after edits, at most once per frame. `author` is who made them; `rev` is the shared revision when co-editing |
-| `selectionchange` | `{ text, empty }` |
+| `selectionchange` | `{ text, length, empty }`: `text` is the first 1000 characters, `length` the whole selection's |
 | `presence` | `{ people: [{ name, color }] }`: the others in the document, `color` as CSS |
 | `comment` | `{ action, id, author, text }`, `action` one of `added`, `resolved`, `reopened`, `deleted` |
 

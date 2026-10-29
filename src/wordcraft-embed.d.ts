@@ -72,7 +72,10 @@ export interface ChangeDetail {
 }
 
 export interface SelectionDetail {
+  /** The selected text's first 1000 characters. */
   text: string;
+  /** The whole selection's length in characters. */
+  length: number;
   /** No text selected (a caret). */
   empty: boolean;
 }
