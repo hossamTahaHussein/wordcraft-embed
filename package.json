@@ -10,11 +10,16 @@
     ".": {
       "types": "./src/wordcraft-embed.d.ts",
       "default": "./src/wordcraft-embed.js"
-    }
+    },
+    "./relay/server.mjs": "./relay/server.mjs",
+    "./relay/token.mjs": "./relay/token.mjs",
+    "./relay/webhook.mjs": "./relay/webhook.mjs"
   },
   "files": [
     "src",
     "scripts",
+    "relay/*.mjs",
+    "relay/comment-commands.json",
     "README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE"
