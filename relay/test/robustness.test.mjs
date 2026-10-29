@@ -1,4 +1,4 @@
-// Regression tests for the final review's relay findings (C1, I2–I5, I7–I9).
+// Robustness: snapshots, duplicates, reconnects, malformed input, crashes and abuse limits.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -32,7 +32,7 @@ async function room(flushMs = 20, opts = {}) {
   return { r, a, dir, done: async () => { await r.flush(); rmSync(dir, { recursive: true, force: true }); } };
 }
 
-test('C1: an op appended just before a snapshot is still broadcast, and so are later ones', async () => {
+test('an op appended just before a snapshot is still broadcast, and so are later ones', async () => {
   const { r, a, done } = await room(30, { limits: { snapshotEvery: 2 } });
   r.message('a', op('a', 1));
   r.message('a', op('a', 2)); // triggers a SnapshotRequest to a (the holder)
@@ -43,7 +43,7 @@ test('C1: an op appended just before a snapshot is still broadcast, and so are l
   await done();
 });
 
-test('I2: the relay drops a replica edit it already sequenced (same or older seq)', async () => {
+test('the relay drops a replica edit it already sequenced (same or older seq)', async () => {
   const { r, a, done } = await room(0);
   r.message('a', op('a', 1, 'X'));
   r.message('a', op('a', 1, 'X'));
@@ -53,7 +53,7 @@ test('I2: the relay drops a replica edit it already sequenced (same or older seq
   await done();
 });
 
-test('I3: Welcome and Resync carry only ops already on disk', async () => {
+test('Welcome and Resync carry only ops already on disk', async () => {
   const { r, a, done } = await room(50);
   r.message('a', op('a', 1));
   const b = member('b');
@@ -67,7 +67,7 @@ test('I3: Welcome and Resync carry only ops already on disk', async () => {
   await done();
 });
 
-test('I4: an old connection closing after a reconnect does not remove the new one', async () => {
+test('an old connection closing after a reconnect does not remove the new one', async () => {
   const { r, a, done } = await room(0);
   const again = member('a');
   r.join(again);
@@ -79,7 +79,7 @@ test('I4: an old connection closing after a reconnect does not remove the new on
   await done();
 });
 
-test('I4: a client id already used by another user is refused', async () => {
+test('a client id already used by another user is refused', async () => {
   const { r, done } = await room(0);
   const thief = member('a', 'someone-else');
   r.join(thief);
@@ -87,7 +87,7 @@ test('I4: a client id already used by another user is refused', async () => {
   await done();
 });
 
-test('I5: malformed ops are refused, not sequenced', async () => {
+test('malformed ops are refused, not sequenced', async () => {
   const { r, a, done } = await room(0);
   for (const bad of [
     { ...op('a', 1), sel: 'x' },
@@ -106,7 +106,7 @@ test('I5: malformed ops are refused, not sequenced', async () => {
   await done();
 });
 
-test('I7: unsaved revisions survive the last person leaving and a restart: the next joiner saves', async () => {
+test('unsaved revisions survive the last person leaving and a restart: the next joiner saves', async () => {
   const { r, a, dir } = await room(0);
   r.message('a', op('a', 1));
   await r.flush();
@@ -128,7 +128,7 @@ test('I7: unsaved revisions survive the last person leaving and a restart: the n
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('I8: a torn last line is cut off on load, so later appends are not lost', async () => {
+test('a torn last line is cut off on load, so later appends are not lost', async () => {
   const { r, a, dir } = await room(0);
   r.message('a', op('a', 1));
   await r.flush();
@@ -147,7 +147,7 @@ test('I8: a torn last line is cut off on load, so later appends are not lost', a
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('I9: votes only for real checkpoints, one per user', async () => {
+test('votes only for real checkpoints, one per user', async () => {
   const { r, a, done } = await room(0);
   for (let i = 1; i <= 50; i++) r.message('a', op('a', i));
   for (let i = 0; i < 100; i++) r.message('a', { t: 'Hash', rev: 1000 - i, h: 'x' });
@@ -164,7 +164,7 @@ test('I9: votes only for real checkpoints, one per user', async () => {
   await done();
 });
 
-test('I9: a snapshot is accepted only from the member asked, once', async () => {
+test('a snapshot is accepted only from the member asked, once', async () => {
   const { r, a, done } = await room(0, { limits: { snapshotEvery: 2 } });
   const b = member('b');
   r.join(b);
@@ -181,14 +181,14 @@ test('I9: a snapshot is accepted only from the member asked, once', async () => 
   await done();
 });
 
-test('I9: resync requests are rate limited', async () => {
+test('resync requests are rate limited', async () => {
   const { r, a, done } = await room(0);
   for (let i = 0; i < 20; i++) r.message('a', { t: 'ResyncRequest', have: 0 });
   assert.ok(a.all('Resync').length <= 2, `${a.all('Resync').length} resyncs`);
   await done();
 });
 
-test('C2: snapshots keep the change history the holder sent, for joiners', async () => {
+test('snapshots keep the change history the holder sent, for joiners', async () => {
   const { r, a, done } = await room(0, { limits: { snapshotEvery: 1 } });
   r.message('a', op('a', 1));
   await r.flush();
