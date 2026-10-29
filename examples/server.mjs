@@ -171,7 +171,7 @@ async function files(req, res, rawName) {
   return send(res, 405, 'Method not allowed');
 }
 
-/** Demo join tokens: anyone may open any document in any role (`role`: edit, the default,
+/** Demo join tokens: anyone may open any document in any role (`role`: edit, the default, suggest,
  * comment or view). A real backend checks who is asking. */
 function token(req, res) {
   const q = new URL(req.url, 'http://localhost').searchParams;

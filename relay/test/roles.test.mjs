@@ -129,3 +129,19 @@ test('the holder is asked for snapshots even when a commenter joined first', asy
   assert.equal(c.types().includes('SnapshotRequest'), false);
   await done();
 });
+
+test('a suggester may make tracked edits and comments only', async () => {
+  const { r, a, done } = await room();
+  const s = member('s', { role: 'suggest' });
+  r.join(s);
+  r.message('s', op('s', 1, { ctx: { track: true } }));
+  r.message('s', op('s', 2, { ctx: { track: false } }));
+  r.message('s', op('s', 3, { cmd: 'review.acceptAll', params: {}, ctx: { track: true } }));
+  r.message('s', op('s', 4, { cmd: 'review.trackChanges', params: { value: false }, ctx: { track: true } }));
+  r.message('s', op('s', 5, { cmd: 'review.newComment', params: { text: 'hm' } }));
+  r.message('s', op('s', 6, { kind: 'restore', cmd: 'collab.restore', params: { version: 1 } }));
+  await r.flush();
+  assert.deepEqual(a.all('Op').map((o) => o.seq), [1, 5]);
+  assert.deepEqual(s.all('Refused').map((x) => [x.seq, x.reason]), [2, 3, 4, 6].map((n) => [n, 'You can only suggest changes in this document']));
+  await done();
+});

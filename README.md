@@ -240,6 +240,7 @@ allow is refused (the sender's editor is told why) and never reaches anyone else
 | Role | May |
 |---|---|
 | `edit` | Everything: type, format, undo their own edits, restore versions |
+| `suggest` | Edit, but every change is a tracked suggestion others accept or reject; comments too. No accepting or rejecting, no switching tracking off, no restoring versions |
 | `comment` | Add, reply to, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
 | `view` | Read, and see the others' edits and cursors as they happen |
 
@@ -349,7 +350,7 @@ wordcraft-cli collab-mcp --relay wss://example.com/relay --token "$JOIN_TOKEN" -
 ```
 
 Issue its token like a person's (`issueToken(secret, { doc, sub, name, role })`); a `comment`
-role keeps it to comments. Its edits arrive as tracked suggestions people accept or reject
+role keeps it to comments, and a `suggest` role to tracked suggestions whatever its flags. Its edits arrive as tracked suggestions people accept or reject
 (`--no-suggest` makes them direct edits). Beside WordCraft's usual MCP tools (run any command,
 inspect, render a page) it has `who_is_here`, `wait_for_changes` (what changed since a
 revision, waiting for it), `comment` and `reply`.

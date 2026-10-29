@@ -2,11 +2,11 @@
 // this document, in this role". The host site's backend issues it with a secret it shares with
 // the relay; the browser passes it along untouched.
 //
-//   claims: { doc, sub, name, role: 'edit' | 'comment' | 'view', iat, exp }
+//   claims: { doc, sub, name, role: 'edit' | 'suggest' | 'comment' | 'view', iat, exp }
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 
-export const ROLES = ['edit', 'comment', 'view'];
+export const ROLES = ['edit', 'suggest', 'comment', 'view'];
 const MAX_LIFETIME_S = 24 * 3600;
 const DEFAULT_LIFETIME_S = 12 * 3600;
 const MAX_TOKEN_LENGTH = 4096;

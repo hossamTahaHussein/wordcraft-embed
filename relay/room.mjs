@@ -4,7 +4,7 @@
 //
 // A member is { client, sub, user, role, agent?, send(message), close(code, reason) }: `client`
 // is the replica (one per editor tab), `sub` the user from the join token, `role` what they may
-// do ('edit' | 'comment' | 'view'), `agent` a program rather than a person (never the holder).
+// do ('edit' | 'suggest' | 'comment' | 'view'), `agent` a program rather than a person (never the holder).
 
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -65,7 +65,10 @@ const COMMENT_ACTIONS = {
 const REFUSED = {
   view: 'You can only view this document',
   comment: 'You can only comment on this document',
+  suggest: 'You can only suggest changes in this document',
 };
+/** What a suggester may not run: deciding on suggestions, or switching their tracking off. */
+const SUGGESTER_REFUSED = new Set(['review.accept', 'review.acceptAll', 'review.reject', 'review.rejectAll', 'review.trackChanges']);
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
 const PALETTE_SIZE = 12;
@@ -370,6 +373,14 @@ export class Room {
   /** Why `member` may not make edit `msg`, or null when it may. */
   refusal(member, msg) {
     if (member.role === 'view') return REFUSED.view;
+    if (member.role === 'suggest') {
+      // Every edit tracked (`ctx.track`), and comments; no restores.
+      const allowed =
+        msg.kind === 'undo' ||
+        msg.kind === 'redo' ||
+        (msg.kind === 'cmd' && (COMMENT_COMMANDS.has(msg.cmd) || (msg.ctx?.track === true && !SUGGESTER_REFUSED.has(msg.cmd))));
+      if (!allowed) return REFUSED.suggest;
+    }
     if (member.role === 'comment') {
       const allowed = msg.kind === 'cmd' ? COMMENT_COMMANDS.has(msg.cmd) : msg.kind === 'undo' || msg.kind === 'redo';
       if (!allowed) return REFUSED.comment;
