@@ -1,13 +1,28 @@
 # wordcraft-embed
 
-Put a full Word-style editor in any website. Users open, edit and save `.docx` files in the page, and
-your site decides where the files go.
+Put a full Word-style editor in any website, and let people write in it together. Users open, edit
+and save `.docx` files in the page, several people (and AI agents) can edit one document at once,
+and your site decides where the files go.
 
-The editor is [WordCraft](https://github.com/storytold/wordcraft) by the ArtCraft team: an
-open-source (MIT OR Apache-2.0) Word reimplementation in Rust that runs in the browser through
-WebAssembly. It covers the ribbon, styles, tables, track changes, comments, references, mail merge,
-and .docx/.odt/.rtf/.md/.html/PDF. This package adds the pieces that turn it into an embeddable
-component:
+Version 1.0.0, by [Hossam Taha](https://hossamtaha.me).
+
+<img src="docs/images/coediting.png" alt="Three people in one document: Bob Diaz types with his name flag above his caret, Cara Ng has two words selected, and the header shows their avatars and All changes saved" width="100%">
+
+The editor is [WordCraft Collab](https://github.com/hossamTahaHussein/wordcraft-collab): a
+modified version of the open-source [WordCraft](https://github.com/storytold/wordcraft) by the
+ArtCraft team (MIT OR Apache-2.0), a Word reimplementation in Rust that runs in the browser through
+WebAssembly. WordCraft covers the ribbon, styles, tables, track changes, comments, references, mail
+merge, and .docx/.odt/.rtf/.md/.html/PDF; WordCraft Collab adds real-time co-editing, a fully
+mirrored Arabic interface, and the APIs below. This package adds the pieces that turn it into an
+embeddable component:
+
+| | |
+|---|---|
+| Co-editing | Named carets and selections, presence, autosave, offline editing that syncs back, undo of your own edits, Suggesting per person, edit/suggest/comment/view roles, version history |
+| Arabic | A translated, mirrored interface, Arabic spell checking, right to left in every format, searchable Arabic PDFs |
+| Integrations | A JavaScript API and events in the page, the relay's HTTP API and signed webhooks on your server, and AI agents that join documents over MCP |
+
+<img src="docs/images/arabic.png" alt="The Arabic interface with the ribbon mirrored and two people editing an Arabic document" width="100%">
 
 | Path | What it is |
 |---|---|
@@ -39,7 +54,7 @@ differ.
 ## Try the demo
 
 ```sh
-npm run fetch-editor      # downloads WordCraft 0.12.0 (~18 MB zip) into editor/
+npm run fetch-editor      # downloads WordCraft Collab 1.0.0 (~21 MB zip) into editor/
 npm start                 # http://localhost:8080
 ```
 
@@ -368,21 +383,23 @@ revision, waiting for it), `comment` and `reply`.
   paid once per version.
 - **Browsers:** WebGPU or WebGL2 is required (any current Chrome, Edge, Firefox or Safari). WebGPU
   needs HTTPS or `localhost`. Elsewhere the editor falls back to WebGL2 on its own.
-- **Maturity:** WordCraft is alpha (v0.12). Test it with your real documents before you rely on it.
+- **Maturity:** WordCraft Collab 1.0 is the first release of the co-editing fork, on top of WordCraft, which is still young. Test it with your real documents before you rely on it.
 
-## Updating WordCraft
+## Updating the editor
 
 ```sh
-node scripts/fetch-editor.mjs latest     # or a version: node scripts/fetch-editor.mjs 0.13.0
+node scripts/fetch-editor.mjs latest     # or a version: node scripts/fetch-editor.mjs 1.0.0
 ```
+
+Releases come from [wordcraft-collab](https://github.com/hossamTahaHussein/wordcraft-collab/releases).
 
 Pin the version you tested in `package.json` (`"wordcraftVersion"`).
 
 ## License
 
-The SDK and examples are MIT OR Apache-2.0, the same as WordCraft. The `editor/` folder is the
-unmodified official WordCraft web build, with its own `LICENSE-*`, `NOTICE`, `ATTRIBUTION.md` and
-font licenses (OFL). Ship those files with it. The ArtCraft name and logos are ArtCraft's
-trademarks. If you modify and rebuild WordCraft, upstream requires removing them (see
-`docs/brand/LICENSE-brand.txt` in the WordCraft repository). Microsoft Word is a trademark of
-Microsoft; WordCraft is not affiliated with it.
+The SDK, the relay and the examples are MIT OR Apache-2.0, the same as WordCraft, and are by
+[Hossam Taha](https://hossamtaha.me). The `editor/` folder is the WordCraft Collab web build, with
+its own `LICENSE-*`, `NOTICE`, `ATTRIBUTION.md` and font licenses (OFL). Ship those files with it.
+WordCraft Collab is based on WordCraft, Copyright (c) 2026 ArtCraft Team and the WordCraft
+contributors; it is independent and not endorsed by the ArtCraft team, and the ArtCraft name and
+logos are not used. Microsoft Word is a trademark of Microsoft; WordCraft is not affiliated with it.

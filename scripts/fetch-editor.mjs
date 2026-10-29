@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Download a WordCraft web release, check it against the release's SHA256SUMS.txt and unpack it
+// Download a WordCraft Collab web release, check it against the release's SHA256SUMS.txt and unpack it
 // into editor/ (the static site the SDK frames).
 //
 //   node scripts/fetch-editor.mjs            # the version pinned in package.json ("wordcraftVersion")
-//   node scripts/fetch-editor.mjs 0.12.0     # a specific release
+//   node scripts/fetch-editor.mjs 1.0.0      # a specific release
 //   node scripts/fetch-editor.mjs latest
 //
 // Needs Node 18+ and `unzip` on PATH.
@@ -14,7 +14,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, renameSync, existsSyn
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const REPO = 'storytold/wordcraft';
+const REPO = 'hossamTahaHussein/wordcraft-collab';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pinned = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).wordcraftVersion;
 
