@@ -43,6 +43,9 @@ function fakePage() {
       globalThis.document.visibilityState = 'hidden';
       for (const h of handlers.visibilitychange) h();
     },
+    unload(event) {
+      for (const h of handlers.beforeunload) h(event);
+    },
   };
 }
 
@@ -200,12 +203,25 @@ test('collab status events carry connection and pending edits', async () => {
   editor.destroy();
 });
 
-test('leaving the page with unsaved changes asks the editor to save', async () => {
+test('hiding the page never makes this copy save over the shared file', async () => {
   const { page, frame, editor } = await setup();
   page.fromEditor({ type: 'wordcraft:dirty', dirty: true });
   page.hide();
-  const save = frame.posted.find((m) => m.type === 'wordcraft:collab' && JSON.parse(m.msg).t === 'Save');
-  assert.ok(save, 'a Save request went to the editor');
+  assert.equal(frame.posted.some((m) => m.type === 'wordcraft:collab' && JSON.parse(m.msg).t === 'Save'), false);
+  editor.destroy();
+});
+
+test('co-editing warns before leaving only while edits are unsynced', async () => {
+  const { page, editor } = await setup();
+  const leave = () => {
+    const event = { prevented: false, preventDefault() { this.prevented = true; } };
+    page.unload(event);
+    return event.prevented;
+  };
+  page.fromEditor({ type: 'wordcraft:dirty', dirty: true });
+  assert.equal(leave(), false, 'dirty but synced: the autosaver saves it');
+  page.fromEditor({ type: 'wordcraft:collab.status', pending: 2, rev: 4 });
+  assert.equal(leave(), true);
   editor.destroy();
 });
 

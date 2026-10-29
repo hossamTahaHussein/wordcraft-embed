@@ -1,9 +1,10 @@
 // Relay persistence: per room, the latest snapshot and the ops after it, so a relay restart
-// loses nothing. DATA_DIR/<room hash>/snapshot.json (written whole, then renamed) and ops.jsonl
-// (appended in batches, fsynced). Writes for one room happen in order.
+// loses nothing. DATA_DIR/<room hash>/snapshot.json (written whole, synced, then renamed),
+// ops.jsonl (appended in batches, synced) and meta.json (the last saved revision). Writes for one
+// room happen in order.
 
 import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export function createStore(dataDir, { flushMs = 20 } = {}) {
@@ -16,7 +17,7 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
   function state(id) {
     let s = rooms.get(id);
     if (!s) {
-      s = { chain: Promise.resolve(), buffer: [], timer: null };
+      s = { chain: Promise.resolve(), buffer: [], timer: null, durable: null, release: null };
       rooms.set(id, s);
     }
     return s;
@@ -36,6 +37,26 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
       await fh.sync();
     } finally {
       await fh.close();
+    }
+  }
+
+  /** Write `text` to `name` in `dir` so that a crash leaves either the old file or the new one. */
+  async function replaceFile(dir, name, text) {
+    const tmp = join(dir, `${name}.tmp`);
+    const fh = await open(tmp, 'w');
+    try {
+      await fh.writeFile(text);
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+    await rename(tmp, join(dir, name));
+    // The rename itself survives a crash once the folder is synced.
+    const d = await open(dir, 'r');
+    try {
+      await d.sync();
+    } finally {
+      await d.close();
     }
   }
 
@@ -61,28 +82,39 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
     return flushBuffer(id).then(() => release?.());
   }
 
+  /** Write whatever is buffered, releasing a waiting batch. */
+  function flush(id) {
+    return state(id).durable ? releaseBatch(id) : flushBuffer(id);
+  }
+
   return {
-    /** @returns {Promise<{snapshot: {rev: number, doc: string} | null, ops: object[]}>} */
+    /** @returns {Promise<{snapshot: object | null, ops: object[], meta: {savedRev?: number} | null}>} */
     async load(id) {
       const dir = dirOf(id);
       let snapshot = null;
-      let ops = [];
+      let meta = null;
+      const ops = [];
       try {
         snapshot = JSON.parse(await readFile(join(dir, 'snapshot.json'), 'utf8'));
       } catch {}
       try {
-        const text = await readFile(join(dir, 'ops.jsonl'), 'utf8');
-        for (const line of text.split('\n')) {
+        meta = JSON.parse(await readFile(join(dir, 'meta.json'), 'utf8'));
+      } catch {}
+      try {
+        const file = join(dir, 'ops.jsonl');
+        const text = await readFile(file, 'utf8');
+        // A crash mid-append leaves a torn last line: cut it off, or the next append would be
+        // glued to it and lost on the following load.
+        const end = text.lastIndexOf('\n') + 1;
+        if (end < text.length) await truncate(file, Buffer.byteLength(text.slice(0, end)));
+        for (const line of text.slice(0, end).split('\n')) {
           if (!line) continue;
           try {
             ops.push(JSON.parse(line));
-          } catch {
-            break; // a torn last line from a crash: everything before it is good
-          }
+          } catch {}
         }
       } catch {}
-      if (snapshot) ops = ops.filter((o) => o.rev > snapshot.rev);
-      return { snapshot, ops };
+      return { snapshot, ops: snapshot ? ops.filter((o) => o.rev > snapshot.rev) : ops, meta };
     },
 
     /** Queue an op; the promise resolves once it is written and synced. */
@@ -101,19 +133,23 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
 
     /** Replace the snapshot and the ops after it. */
     writeSnapshot(id, snapshot, opsAfter) {
-      flushBuffer(id);
+      flush(id);
       return queue(id, async () => {
         const dir = dirOf(id);
         await mkdir(dir, { recursive: true });
-        await writeFile(join(dir, 'snapshot.json.tmp'), JSON.stringify(snapshot));
-        await rename(join(dir, 'snapshot.json.tmp'), join(dir, 'snapshot.json'));
-        await writeFile(join(dir, 'ops.jsonl.tmp'), opsAfter.map((o) => JSON.stringify(o) + '\n').join(''));
-        await rename(join(dir, 'ops.jsonl.tmp'), join(dir, 'ops.jsonl'));
+        await replaceFile(dir, 'snapshot.json', JSON.stringify(snapshot));
+        await replaceFile(dir, 'ops.jsonl', opsAfter.map((o) => JSON.stringify(o) + '\n').join(''));
       });
     },
 
-    flush(id) {
-      return state(id).durable ? releaseBatch(id) : flushBuffer(id);
+    writeMeta(id, meta) {
+      return queue(id, async () => {
+        const dir = dirOf(id);
+        await mkdir(dir, { recursive: true });
+        await replaceFile(dir, 'meta.json', JSON.stringify(meta));
+      });
     },
+
+    flush,
   };
 }

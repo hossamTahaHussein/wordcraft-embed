@@ -2,15 +2,44 @@
 // keeps the log since the latest snapshot, tells newcomers where to start, picks who saves and
 // compares the replicas' fingerprints. Message types (`t`) match wordcraft_collab::proto.
 //
-// A member is { client, user, role, send(message), close(code, reason) }.
+// A member is { client, sub, user, role, send(message), close(code, reason) }: `client` is the
+// replica (one per editor tab), `sub` the user from the join token.
 
 export const LIMITS = {
   members: 50,
   opsPerSecond: 200,
   snapshotEvery: 200,
+  hashEvery: 50,
   idleSaveMs: 2000,
   maxSaveDelayMs: 10000,
+  resyncEveryMs: 5000,
+  maxHistory: 2000,
 };
+
+const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
+const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
+
+/** Whether `msg` has the shape of an op (wordcraft_collab::proto::Op); replicas can't decode one
+ * that doesn't, and a revision nobody can apply would stall the document. */
+function wellFormed(msg) {
+  const sel = msg.sel;
+  return (
+    isCount(msg.seq) &&
+    msg.seq > 0 &&
+    isCount(msg.base) &&
+    OP_KINDS.has(msg.kind) &&
+    typeof msg.cmd === 'string' &&
+    msg.cmd.length <= 200 &&
+    !!sel &&
+    typeof sel === 'object' &&
+    (sel.story === 'body' || (sel.story && typeof sel.story === 'object' && isCount(sel.story.part))) &&
+    isCount(sel.anchor) &&
+    isCount(sel.head) &&
+    !!msg.ctx &&
+    typeof msg.ctx === 'object' &&
+    !Array.isArray(msg.ctx)
+  );
+}
 
 export class Room {
   constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {} }) {
@@ -20,10 +49,15 @@ export class Room {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.limits = { ...LIMITS, ...limits };
-    /** The latest snapshot; `seen` is the last edit (seq) it holds from each replica.
-     * @type {{rev: number, doc: string, seen?: Record<string, number>} | null} */
+    /** The latest snapshot: `seen` is the last edit (seq) it holds from each replica, `history`
+     * the change spans of the revisions before it (for edits based on an earlier revision).
+     * @type {{rev: number, doc: string, seen?: Record<string, number>, history?: object[]} | null} */
     this.snapshot = null;
     this.log = [];
+    /** The newest revision on disk: only those are given out (Welcome, Resync, broadcasts). */
+    this.durableRev = 0;
+    /** The last edit sequenced from each replica, to drop a resent duplicate. */
+    this.lastSeq = new Map();
     /** Members in join order (the first editor holds the autosave lease). */
     this.members = new Map();
     /** Members waiting for revision 0 while the first one opens the document. */
@@ -33,6 +67,8 @@ export class Room {
     this.dirtySince = null;
     this.saveTimer = null;
     this.snapshotAskedAt = 0;
+    /** The member asked for the next snapshot; only it may send one. */
+    this.snapshotFrom = null;
     this.votes = new Map();
   }
 
@@ -46,23 +82,38 @@ export class Room {
   }
 
   async load() {
-    const { snapshot, ops } = await this.store.load(this.id);
+    const { snapshot, ops, meta } = await this.store.load(this.id);
     this.snapshot = snapshot;
     this.log = ops;
-    this.savedRev = this.rev;
+    this.durableRev = this.rev;
+    this.savedRev = Math.min(meta?.savedRev ?? 0, this.rev);
+    for (const [client, seq] of Object.entries(snapshot?.seen ?? {})) this.lastSeq.set(client, seq);
+    for (const o of ops) this.lastSeq.set(o.client, o.seq);
   }
 
   flush() {
     return this.store.flush(this.id);
   }
 
+  /** The durable part of the log after `rev`. */
+  durableAfter(rev) {
+    return this.log.filter((o) => o.rev > rev && o.rev <= this.durableRev);
+  }
+
   /** A member arrives. `haveRev`: the revision a reconnecting replica already has. */
   join(member, haveRev) {
-    if (this.members.size >= this.limits.members) {
+    const old = this.members.get(member.client);
+    if (old && old.sub !== member.sub) {
+      member.close(4400, 'That client id belongs to someone else');
+      return;
+    }
+    if (!old && this.members.size >= this.limits.members) {
       member.close(4409, 'This document has too many people in it');
       return;
     }
+    if (old) old.close(4000, 'Replaced by a newer connection');
     member.bucket = { tokens: this.limits.opsPerSecond, at: this.now() };
+    member.resyncAt = -Infinity;
     this.members.set(member.client, member);
     if (!this.snapshot) {
       if (this.bootstrapper && this.bootstrapper !== member.client) {
@@ -74,20 +125,37 @@ export class Room {
       return;
     }
     this.welcome(member, haveRev);
+    // Revisions nobody saved yet (the last person left, or the relay restarted) are saved now.
+    if (this.rev > this.savedRev && !this.saveTimer) this.scheduleSave();
   }
 
   welcome(member, haveRev) {
     const base = this.snapshot?.rev ?? 0;
-    if (Number.isInteger(haveRev) && haveRev >= base && haveRev <= this.rev) {
-      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.log.filter((o) => o.rev > haveRev), you: member.client });
+    if (Number.isInteger(haveRev) && haveRev >= base && haveRev <= this.durableRev) {
+      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.durableAfter(haveRev), you: member.client });
     } else {
-      member.send({ t: 'Welcome', rev: base, snapshot: this.snapshot.doc, ops: this.log, you: member.client, seen: this.seenBy(member.client) });
+      member.send({ t: 'Welcome', ...this.fromSnapshot(member), you: member.client });
     }
   }
 
-  leave(client) {
+  /** The snapshot and what a replica needs with it. */
+  fromSnapshot(member) {
+    return {
+      rev: this.snapshot.rev,
+      snapshot: this.snapshot.doc,
+      ops: this.durableAfter(this.snapshot.rev),
+      seen: this.snapshot.seen?.[member.client] ?? 0,
+      history: this.snapshot.history ?? [],
+    };
+  }
+
+  /** A member's connection closed. With `member`, only if it is still that connection (a
+   * reconnect may have replaced it). */
+  leave(client, member) {
+    if (member && this.members.get(client) !== member) return;
     this.members.delete(client);
     this.waiting = this.waiting.filter((c) => c !== client);
+    if (this.snapshotFrom === client) this.snapshotFrom = null;
     if (this.bootstrapper === client && !this.snapshot) {
       this.bootstrapper = null;
       const next = this.waiting.shift();
@@ -102,6 +170,11 @@ export class Room {
   message(client, msg) {
     const member = this.members.get(client);
     if (!member || !msg || typeof msg.t !== 'string') return;
+    if (!this.take(member)) {
+      member.close(4429, 'Too many messages per second');
+      this.leave(member.client, member);
+      return;
+    }
     switch (msg.t) {
       case 'Op':
         return this.op(member, msg);
@@ -110,7 +183,10 @@ export class Room {
       case 'Hash':
         return this.vote(member, msg);
       case 'Saved':
-        if (Number.isInteger(msg.rev)) this.savedRev = Math.max(this.savedRev, Math.min(msg.rev, this.rev));
+        if (Number.isInteger(msg.rev) && msg.rev > this.savedRev) {
+          this.savedRev = Math.min(msg.rev, this.rev);
+          this.store.writeMeta(this.id, { savedRev: this.savedRev });
+        }
         return;
       case 'ResyncRequest':
         return this.resync(member);
@@ -119,27 +195,31 @@ export class Room {
 
   op(member, msg) {
     if (!this.snapshot || member.role !== 'edit') return;
-    if (!this.take(member)) {
-      member.close(4429, 'Too many edits per second');
-      this.leave(member.client);
-      return;
-    }
+    if (!wellFormed(msg) || msg.base > this.rev) return;
+    // A resent edit the relay already has (a reconnect raced its echo).
+    if (msg.seq <= (this.lastSeq.get(member.client) ?? 0)) return;
+    this.lastSeq.set(member.client, msg.seq);
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
     this.log.push(op);
     // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
     // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
     this.store.append(this.id, op).then(() => {
+      this.durableRev = Math.max(this.durableRev, op.rev);
       for (const m of this.members.values()) m.send(op);
     });
     this.scheduleSave();
     if (this.rev - (this.snapshot?.rev ?? 0) >= this.limits.snapshotEvery && this.snapshotAskedAt < this.rev - this.limits.snapshotEvery + 1) {
-      this.snapshotAskedAt = this.rev;
-      this.holder?.send({ t: 'SnapshotRequest' });
+      const holder = this.holder;
+      if (holder) {
+        this.snapshotAskedAt = this.rev;
+        this.snapshotFrom = holder.client;
+        holder.send({ t: 'SnapshotRequest' });
+      }
     }
   }
 
-  /** Token bucket: `opsPerSecond`, bursting to the same number. */
+  /** Token bucket for every message: `opsPerSecond`, bursting to the same number. */
   take(member) {
     const b = member.bucket;
     const now = this.now();
@@ -155,7 +235,7 @@ export class Room {
     if (!this.snapshot) {
       // Revision 0, from the member who opened the document.
       if (msg.rev !== 0 || member.client !== this.bootstrapper) return;
-      this.snapshot = { rev: 0, doc: msg.doc, seen: {} };
+      this.snapshot = { rev: 0, doc: msg.doc, seen: {}, history: [] };
       this.store.writeSnapshot(this.id, this.snapshot, []);
       for (const c of this.waiting.splice(0)) {
         const m = this.members.get(c);
@@ -163,48 +243,53 @@ export class Room {
       }
       return;
     }
-    if (msg.rev <= this.snapshot.rev || msg.rev > this.rev) return;
+    // Only the member asked, once, and only a revision it can have.
+    if (member.client !== this.snapshotFrom) return;
+    this.snapshotFrom = null;
+    if (msg.rev <= this.snapshot.rev || msg.rev > this.durableRev) return;
+    const history = Array.isArray(msg.history) ? msg.history.slice(-this.limits.maxHistory) : [];
     const seen = { ...this.snapshot.seen };
     for (const o of this.log) if (o.rev <= msg.rev) seen[o.client] = o.seq;
     this.log = this.log.filter((o) => o.rev > msg.rev);
-    this.snapshot = { rev: msg.rev, doc: msg.doc, seen };
+    this.snapshot = { rev: msg.rev, doc: msg.doc, seen, history };
     this.store.writeSnapshot(this.id, this.snapshot, this.log);
   }
 
   resync(member) {
     if (!this.snapshot) return;
-    member.send({ t: 'Resync', rev: this.snapshot.rev, snapshot: this.snapshot.doc, ops: this.log, seen: this.seenBy(member.client) });
+    const now = this.now();
+    if (now - member.resyncAt < this.limits.resyncEveryMs) return;
+    member.resyncAt = now;
+    member.send({ t: 'Resync', ...this.fromSnapshot(member) });
   }
 
-  /** The last edit of `client`'s the snapshot holds (0 for none). */
-  seenBy(client) {
-    return this.snapshot?.seen?.[client] ?? 0;
-  }
-
-  /** Compare fingerprints at one revision: whoever disagrees with the majority (on a tie, with
-   * the lease holder) starts again from the snapshot. */
+  /** Compare fingerprints at a checkpoint revision, one vote per user: whoever disagrees with
+   * the majority (on a tie, with the lease holder) starts again from the snapshot. */
   vote(member, msg) {
-    if (!Number.isInteger(msg.rev) || typeof msg.h !== 'string') return;
+    if (!Number.isInteger(msg.rev) || typeof msg.h !== 'string' || msg.h.length > 64) return;
+    if (msg.rev <= 0 || msg.rev > this.rev || msg.rev % this.limits.hashEvery !== 0) return;
     let votes = this.votes.get(msg.rev);
     if (!votes) {
-      votes = { hashes: new Map(), resynced: new Set() };
+      votes = { hashes: new Map(), clients: new Map(), resynced: new Set() };
       this.votes.set(msg.rev, votes);
-      for (const r of this.votes.keys()) if (r < msg.rev - 500) this.votes.delete(r);
+      for (const r of this.votes.keys()) if (r < this.rev - 10 * this.limits.hashEvery) this.votes.delete(r);
     }
-    votes.hashes.set(member.client, msg.h);
+    if (votes.hashes.has(member.sub)) return;
+    votes.hashes.set(member.sub, msg.h);
+    votes.clients.set(member.sub, member.client);
     if (votes.hashes.size < 2) return;
     const counts = new Map();
     for (const h of votes.hashes.values()) counts.set(h, (counts.get(h) || 0) + 1);
     const top = Math.max(...counts.values());
     const leaders = [...counts.entries()].filter(([, n]) => n === top).map(([h]) => h);
-    const holderHash = this.holder && votes.hashes.get(this.holder.client);
+    const holderHash = this.holder && votes.hashes.get(this.holder.sub);
     const winner = leaders.length === 1 ? leaders[0] : leaders.includes(holderHash) ? holderHash : leaders[0];
-    for (const [client, h] of votes.hashes) {
-      if (h !== winner && !votes.resynced.has(client)) {
-        votes.resynced.add(client);
-        const m = this.members.get(client);
+    for (const [sub, h] of votes.hashes) {
+      if (h !== winner && !votes.resynced.has(sub)) {
+        votes.resynced.add(sub);
+        const m = this.members.get(votes.clients.get(sub));
         if (m) {
-          console.warn(`relay: ${this.id}: replica ${client} diverged at rev ${msg.rev}; resyncing`);
+          console.warn(`relay: ${this.id}: replica ${m.client} diverged at rev ${msg.rev}; resyncing`);
           this.resync(m);
         }
       }

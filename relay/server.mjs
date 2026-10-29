@@ -18,6 +18,8 @@ export const MAX_OP_BYTES = 256 * 1024;
 export const MAX_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const HELLO_TIMEOUT_MS = 10_000;
 const CLIENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const MAX_HELLO_BYTES = 16 * 1024;
+const PING_EVERY_MS = 30_000;
 
 /**
  * @param {{secret: string, dataDir: string, server?: import('node:http').Server, port?: number, host?: string, path?: string}} options
@@ -36,6 +38,19 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
     server = own;
   }
   const wss = new WebSocketServer({ server, path, maxPayload: MAX_SNAPSHOT_BYTES });
+  // A connection that stops answering pings (a sleeping laptop, a dropped network) is closed,
+  // so its replica can reconnect and the room doesn't keep a dead member.
+  const heartbeat = setInterval(() => {
+    for (const ws of wss.clients) {
+      if (!ws.isAlive) {
+        ws.terminate();
+        continue;
+      }
+      ws.isAlive = false;
+      ws.ping();
+    }
+  }, PING_EVERY_MS);
+  heartbeat.unref?.();
 
   async function roomFor(id) {
     let entry = rooms.get(id);
@@ -51,6 +66,9 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
   wss.on('connection', (ws) => {
     let room = null;
     let client = null;
+    let me = null;
+    ws.isAlive = true;
+    ws.on('pong', () => (ws.isAlive = true));
     const helloTimer = setTimeout(() => ws.close(4401, 'No hello'), HELLO_TIMEOUT_MS);
     const send = (m) => ws.readyState === ws.OPEN && ws.send(JSON.stringify(m));
     const close = (code, reason) => ws.close(code, reason);
@@ -65,6 +83,8 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         return close(1007, 'Not JSON');
       }
       if (!room) {
+        // Nothing large before the token is checked.
+        if (text.length > MAX_HELLO_BYTES) return close(1009, 'Say hello first');
         if (client) return; // hello is being handled
         if (msg?.t !== 'hello') return close(4401, 'Say hello first');
         if (typeof msg.client !== 'string' || !CLIENT_ID.test(msg.client)) return close(4400, 'Bad client id');
@@ -80,7 +100,8 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         const r = await roomFor(claims.doc);
         if (ws.readyState !== ws.OPEN) return;
         room = r;
-        room.join({ client, user: claims.name, role: claims.role, send, close }, Number.isInteger(msg.haveRev) ? msg.haveRev : undefined);
+        me = { client, sub: claims.sub, user: claims.name, role: claims.role, send, close };
+        room.join(me, Number.isInteger(msg.haveRev) ? msg.haveRev : undefined);
         return;
       }
       if (msg?.t !== 'Snapshot' && text.length > MAX_OP_BYTES) return close(1009, 'Message too large');
@@ -89,7 +110,7 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
 
     ws.on('close', () => {
       clearTimeout(helloTimer);
-      if (room && client) room.leave(client);
+      if (room && client) room.leave(client, me);
     });
   });
 
@@ -99,6 +120,7 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
       return server.address()?.port;
     },
     async close() {
+      clearInterval(heartbeat);
       for (const { room } of rooms.values()) await room.flush();
       for (const ws of wss.clients) ws.terminate();
       await new Promise((resolve) => wss.close(resolve));

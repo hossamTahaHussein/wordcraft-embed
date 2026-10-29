@@ -188,7 +188,10 @@ export class WordCraftEditor extends EventTarget {
     this._onMessage = (event) => this._receive(event);
     window.addEventListener('message', this._onMessage);
     this._onBeforeUnload = (event) => {
-      if (this.options.guardUnload && this.dirty) {
+      // Co-editing: the relay's autosaver saves the shared document; only edits that haven't
+      // reached the relay yet would be lost.
+      const unsaved = this._collab ? this._collab.pending > 0 : this.dirty;
+      if (this.options.guardUnload && unsaved) {
         event.preventDefault();
         event.returnValue = '';
       }
@@ -309,12 +312,6 @@ class CollabLink {
     this.rev = null;
     this.pending = 0;
     this.connected = false;
-    this.onHidden = () => {
-      // Leaving or hiding the page with unsaved changes: save now (best effort; autosave runs
-      // every few seconds anyway).
-      if (globalThis.document?.visibilityState === 'hidden' && editor.dirty) this.toEditor(JSON.stringify({ t: 'Save' }));
-    };
-    globalThis.document?.addEventListener?.('visibilitychange', this.onHidden);
   }
 
   async connect() {
@@ -397,7 +394,6 @@ class CollabLink {
 
   stop() {
     this.stopped = true;
-    globalThis.document?.removeEventListener?.('visibilitychange', this.onHidden);
     const ws = this.ws;
     this.ws = null;
     ws?.close();
