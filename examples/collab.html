@@ -75,7 +75,10 @@
     });
     editor.addEventListener('collab', ({ detail }) => {
       if (!detail.connected) show(detail.pending ? `Offline — ${detail.pending} edits will sync` : 'Reconnecting…', 'off');
-      else show(detail.pending ? 'Saving…' : 'All changes synced');
+      else {
+        const others = detail.people > 1 ? ` · ${detail.people} people` : '';
+        show((detail.pending ? 'Saving…' : 'All changes synced') + others);
+      }
     });
 
   </script>

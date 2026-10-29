@@ -54,6 +54,8 @@ export interface CollabStatus {
   pending: number;
   /** The last confirmed revision, or null before joining. */
   rev: number | null;
+  /** Everyone in the document, this person included. */
+  people: number;
 }
 
 export interface WordCraftEventMap {

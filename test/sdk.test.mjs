@@ -197,7 +197,7 @@ test('collab status events carry connection and pending edits', async () => {
   made[0].open();
   await tick();
   page.fromEditor({ type: 'wordcraft:collab.status', pending: 2, rev: 4 });
-  assert.deepEqual(seen.at(-1), { connected: true, pending: 2, rev: 4 });
+  assert.deepEqual(seen.at(-1), { connected: true, pending: 2, rev: 4, people: 1 });
   made[0].drop();
   assert.equal(seen.at(-1).connected, false);
   editor.destroy();
@@ -228,4 +228,15 @@ test('co-editing warns before leaving only while edits are unsynced', async () =
 test('cross-origin src still throws', async () => {
   fakePage();
   assert.throws(() => new WordCraftEditor('#e', { src: 'https://elsewhere.example/wordcraft/' }), /same origin|origin/i);
+});
+
+test('collab status carries how many people are in the document', async () => {
+  const seen = [];
+  const { made, page, editor } = await setup();
+  editor.addEventListener('collab', (e) => seen.push({ ...e.detail }));
+  made[0].open();
+  await tick();
+  page.fromEditor({ type: 'wordcraft:collab.status', pending: 0, rev: 3, people: 4 });
+  assert.equal(seen.at(-1).people, 4);
+  editor.destroy();
 });

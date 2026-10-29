@@ -116,7 +116,7 @@ function editorUrl(src, { author, webgl, collab, docName }) {
  * - `save`   { name, bytes, blob, saveAs }   the user saved or exported a file (see onSave)
  * - `dirty`  { dirty }                       unsaved changes appeared or went away
  * - `error`  { error }                       the editor couldn't start, or onSave failed
- * - `collab` { connected, pending, rev }     co-editing: connection and unsent edits changed
+ * - `collab` { connected, pending, rev, people }  co-editing: connection, unsent edits or people changed
  */
 export class WordCraftEditor extends EventTarget {
   /**
@@ -311,6 +311,7 @@ class CollabLink {
     this.stopped = false;
     this.rev = null;
     this.pending = 0;
+    this.people = 1;
     this.connected = false;
   }
 
@@ -377,9 +378,10 @@ class CollabLink {
     if (this.ws && this.ws.readyState === (this.WS.OPEN ?? 1)) this.ws.send(msg);
   }
 
-  status({ pending, rev }) {
+  status({ pending, rev, people }) {
     if (Number.isInteger(rev)) this.rev = rev;
     if (Number.isInteger(pending)) this.pending = pending;
+    if (Number.isInteger(people)) this.people = people;
     this.emit();
   }
 
@@ -389,7 +391,7 @@ class CollabLink {
   }
 
   emit() {
-    this.editor._emit('collab', { connected: this.connected, pending: this.pending, rev: this.rev });
+    this.editor._emit('collab', { connected: this.connected, pending: this.pending, rev: this.rev, people: this.people });
   }
 
   stop() {
