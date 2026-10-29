@@ -25,7 +25,15 @@ const MESSAGE = {
   failed: 'wordcraft:failed',
   collab: 'wordcraft:collab',
   collabStatus: 'wordcraft:collab.status',
+  call: 'wordcraft:call',
+  result: 'wordcraft:result',
+  event: 'wordcraft:event',
 };
+
+/** The editor's events the page hears (`wordcraft:event`). */
+const EDITOR_EVENTS = new Set(['change', 'selectionchange', 'presence', 'comment']);
+
+const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 
 /** Relay close codes after which reconnecting can't help. */
 const PERMANENT_CLOSE = {
@@ -131,6 +139,7 @@ export class WordCraftEditor extends EventTarget {
    * @param {string} [options.language] interface language, e.g. 'ar', 'fr' (default: the browser's)
    * @param {boolean} [options.guardUnload=true] warn before leaving the page with unsaved changes
    * @param {number} [options.readyTimeout=60000] ms to wait for the editor before an `error`
+   * @param {number} [options.callTimeout=30000] ms an API call (run, getText…) may take
    * @param {string} [options.title='Document editor'] accessible title of the iframe
    * @param {(file: {name: string, bytes: ArrayBuffer, blob: Blob, saveAs: boolean}) => any} [options.onSave]
    * @param {(info: {version: string}) => void} [options.onReady]
@@ -145,7 +154,10 @@ export class WordCraftEditor extends EventTarget {
     super();
     const host = typeof container === 'string' ? document.querySelector(container) : container;
     if (!host) throw new Error(`WordCraft: no element matches ${container}`);
-    this.options = { src: '/wordcraft/', guardUnload: true, readyTimeout: DEFAULT_READY_TIMEOUT_MS, ...options };
+    this.options = { src: '/wordcraft/', guardUnload: true, readyTimeout: DEFAULT_READY_TIMEOUT_MS, callTimeout: DEFAULT_CALL_TIMEOUT_MS, ...options };
+    /** API calls waiting for their answer, by id. */
+    this._calls = new Map();
+    this._nextCall = 1;
     this.version = null;
     this.dirty = false;
     this.destroyed = false;
@@ -230,6 +242,65 @@ export class WordCraftEditor extends EventTarget {
     this.iframe.contentWindow.postMessage({ type: MESSAGE.open, name: file.name, bytes: file.bytes }, this.origin, [file.bytes]);
   }
 
+  /**
+   * Run any WordCraft command (the same names the ribbon and the MCP tools use), e.g.
+   * `run('format.bold', { value: true })`. Resolves with the command's result.
+   * @param {string} command
+   * @param {object} [params]
+   */
+  run(command, params = {}) {
+    return this._call('run', { command, params });
+  }
+
+  /** The document's text. */
+  async getText() {
+    return (await this._call('getText')).text;
+  }
+
+  /**
+   * The document as a file in `format`.
+   * @param {'docx'|'odt'|'rtf'|'pdf'|'html'|'md'|'txt'} [format='docx']
+   * @returns {Promise<{name: string, blob: Blob}>}
+   */
+  getDocument(format = 'docx') {
+    return this._call('getDocument', { format });
+  }
+
+  /** The document's structure (headings, paragraphs, tables, comments) as JSON. */
+  inspect() {
+    return this._call('inspect');
+  }
+
+  /** Type `text` at the cursor, replacing the selection. */
+  async insertText(text) {
+    await this._call('insertText', { text: String(text) });
+  }
+
+  /** Select the first occurrence of `text`. */
+  async select(text) {
+    await this._call('select', { text: String(text) });
+  }
+
+  /** Read only (`true`) or editable again: this person's edits are refused while read only. */
+  async setReadOnly(on = true) {
+    await this._call('setReadOnly', { on: Boolean(on) });
+  }
+
+  /** Send API call `method` once the editor is ready; resolves with its result. */
+  async _call(method, params = {}) {
+    await this.ready;
+    if (this.destroyed) throw new Error('WordCraft: the editor was destroyed');
+    const id = this._nextCall++;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._calls.delete(id);
+        reject(new Error(`WordCraft: ${method} timed out`));
+      }, this.options.callTimeout);
+      this._calls.set(id, { resolve, reject, timer });
+      this.iframe.contentWindow.postMessage({ type: MESSAGE.call, id, method, params }, this.origin);
+    });
+  }
+
   /** Give keyboard focus to the editor. */
   focus() {
     this.iframe.focus();
@@ -244,6 +315,11 @@ export class WordCraftEditor extends EventTarget {
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     this._collab?.stop();
     this._collab = null;
+    for (const { reject, timer } of this._calls.values()) {
+      clearTimeout(timer);
+      reject(new Error('WordCraft: the editor was destroyed'));
+    }
+    this._calls.clear();
     this.iframe.remove();
     this._rejectReady(new Error('WordCraft: the editor was destroyed'));
   }
@@ -276,6 +352,25 @@ export class WordCraftEditor extends EventTarget {
         break;
       case MESSAGE.collabStatus:
         this._collab?.status(data);
+        break;
+      case MESSAGE.result: {
+        const call = this._calls.get(data.id);
+        if (!call) break;
+        this._calls.delete(data.id);
+        clearTimeout(call.timer);
+        if (!data.ok) {
+          call.reject(new Error(String(data.error || 'the call failed')));
+        } else if (data.bytes != null) {
+          const bytes = data.bytes instanceof ArrayBuffer ? data.bytes : new Uint8Array(data.bytes).buffer;
+          const name = String(data.name || 'Document.docx');
+          call.resolve({ name, blob: new Blob([bytes], { type: mimeType(name) }) });
+        } else {
+          call.resolve(data.result);
+        }
+        break;
+      }
+      case MESSAGE.event:
+        if (EDITOR_EVENTS.has(data.event)) this._emit(data.event, data.detail);
         break;
       case MESSAGE.failed:
         this._fail(new Error(`WordCraft couldn't start: ${data.error || 'unknown error'}`));
@@ -436,7 +531,7 @@ export class WordCraftEditorElement extends ElementBase {
       guardUnload: !this.hasAttribute('no-unload-guard'),
       title: this.getAttribute('title') || undefined,
     });
-    for (const type of ['ready', 'save', 'dirty', 'error']) {
+    for (const type of ['ready', 'save', 'dirty', 'error', 'change', 'selectionchange', 'presence', 'comment']) {
       this.editor.addEventListener(type, (event) => {
         this.dispatchEvent(new CustomEvent(`wordcraft-${type}`, { detail: event.detail, bubbles: true, composed: true }));
       });
@@ -460,6 +555,34 @@ export class WordCraftEditorElement extends ElementBase {
 
   focus() {
     this.editor?.focus();
+  }
+
+  run(command, params) {
+    return this.editor.run(command, params);
+  }
+
+  getText() {
+    return this.editor.getText();
+  }
+
+  getDocument(format) {
+    return this.editor.getDocument(format);
+  }
+
+  inspect() {
+    return this.editor.inspect();
+  }
+
+  insertText(text) {
+    return this.editor.insertText(text);
+  }
+
+  select(text) {
+    return this.editor.select(text);
+  }
+
+  setReadOnly(on) {
+    return this.editor.setReadOnly(on);
   }
 }
 

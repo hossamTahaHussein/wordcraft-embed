@@ -39,6 +39,10 @@ function fakePage() {
     fromEditor(data, frame = frames[0]) {
       for (const h of handlers.message) h({ origin: ORIGIN, source: frame.contentWindow, data });
     },
+    /** A message from another origin (a page that is not the editor). */
+    fromOtherOrigin(data, frame = frames[0]) {
+      for (const h of handlers.message) h({ origin: 'http://evil.example', source: frame.contentWindow, data });
+    },
     hide() {
       globalThis.document.visibilityState = 'hidden';
       for (const h of handlers.visibilitychange) h();
@@ -245,4 +249,135 @@ test('a language option sets the interface language', async () => {
   const { frame, editor } = await setup({}, { language: 'ar' });
   assert.equal(new URL(frame.src).searchParams.get('lang'), 'ar');
   editor.destroy();
+});
+
+// The JavaScript API: calls over `wordcraft:call` / `wordcraft:result`, events over `wordcraft:event`.
+
+function plain(options = {}) {
+  const page = fakePage();
+  const editor = new WordCraftEditor('#e', { src: '/wordcraft/', readyTimeout: 5000, guardUnload: false, ...options });
+  const frame = page.frames[0];
+  const ready = () => page.fromEditor({ type: 'wordcraft:ready', version: '0.12.0' });
+  const calls = () => frame.posted.filter((m) => m.type === 'wordcraft:call');
+  const reply = (call, fields) => page.fromEditor({ type: 'wordcraft:result', id: call.id, ...fields });
+  return { page, editor, frame, ready, calls, reply };
+}
+
+test('calls_wait_for_ready', async () => {
+  const { editor, ready, calls, reply } = plain();
+  const text = editor.getText();
+  await tick();
+  assert.equal(calls().length, 0, 'nothing is sent before the editor is ready');
+  ready();
+  await tick();
+  assert.deepEqual(calls().map((c) => [c.method, c.params]), [['getText', {}]]);
+  reply(calls()[0], { ok: true, result: { text: 'Hi' } });
+  assert.equal(await text, 'Hi');
+});
+
+test('each method sends its call', async () => {
+  const { editor, ready, calls, reply } = plain();
+  ready();
+  await tick();
+  const pending = [
+    editor.run('format.bold', { value: true }),
+    editor.inspect(),
+    editor.insertText('Hello'),
+    editor.select('Hello'),
+    editor.setReadOnly(true),
+  ];
+  await tick();
+  assert.deepEqual(
+    calls().map((c) => [c.method, c.params]),
+    [
+      ['run', { command: 'format.bold', params: { value: true } }],
+      ['inspect', {}],
+      ['insertText', { text: 'Hello' }],
+      ['select', { text: 'Hello' }],
+      ['setReadOnly', { on: true }],
+    ],
+  );
+  const results = [{ ok: 1 }, { paragraphs: [] }, {}, {}, { viewing: true }];
+  calls().forEach((c, i) => reply(c, { ok: true, result: results[i] }));
+  const got = await Promise.all(pending);
+  assert.deepEqual(got[0], { ok: 1 });
+  assert.deepEqual(got[1], { paragraphs: [] });
+  assert.equal(got[2], undefined);
+});
+
+test('a_failed_call_rejects_only_itself', async () => {
+  const { editor, ready, calls, reply } = plain();
+  ready();
+  await tick();
+  const bad = editor.run('no.such');
+  const good = editor.getText();
+  await tick();
+  const [b, g] = calls();
+  reply(b, { ok: false, error: 'unknown command no.such' });
+  reply(g, { ok: true, result: { text: 'still fine' } });
+  await assert.rejects(bad, /unknown command no\.such/);
+  assert.equal(await good, 'still fine');
+});
+
+test('getdocument_returns_a_named_blob', async () => {
+  const { editor, ready, calls, reply } = plain();
+  ready();
+  await tick();
+  const file = editor.getDocument('pdf');
+  await tick();
+  assert.deepEqual(calls()[0].params, { format: 'pdf' });
+  reply(calls()[0], { ok: true, result: { name: 'Doc.pdf' }, name: 'Doc.pdf', bytes: new Uint8Array([37, 80, 68, 70]).buffer });
+  const { name, blob } = await file;
+  assert.equal(name, 'Doc.pdf');
+  assert.equal(blob.type, 'application/pdf');
+  assert.equal(new TextDecoder().decode(await blob.arrayBuffer()), '%PDF');
+  const second = editor.getDocument();
+  await tick();
+  assert.deepEqual(calls()[1].params, { format: 'docx' }, 'docx by default');
+  editor.destroy();
+  await assert.rejects(second, /destroyed/);
+});
+
+test('destroy_rejects_pending_calls', async () => {
+  const { editor, ready } = plain();
+  ready();
+  await tick();
+  const text = editor.getText();
+  await tick();
+  editor.destroy();
+  await assert.rejects(text, /destroyed/);
+  await assert.rejects(editor.getText(), /destroyed/);
+});
+
+test('a_call_times_out', async () => {
+  const { editor, ready } = plain({ callTimeout: 30 });
+  ready();
+  await tick();
+  await assert.rejects(editor.getText(), /timed out/);
+});
+
+test('events_are_dispatched', async () => {
+  const { page, editor, frame, ready } = plain();
+  ready();
+  await tick();
+  const heard = [];
+  for (const type of ['change', 'selectionchange', 'presence', 'comment']) {
+    editor.addEventListener(type, (e) => heard.push([type, e.detail]));
+  }
+  const send = (event, detail) => page.fromEditor({ type: 'wordcraft:event', event, detail }, frame);
+  send('change', { rev: 3, author: 'Ann' });
+  send('selectionchange', { text: 'Hi', empty: false });
+  send('presence', { people: [{ name: 'Ann', color: '#aabbcc' }] });
+  send('comment', { action: 'added', id: 1, author: 'Ann', text: 'Note' });
+  send('somethingElse', {});
+  assert.deepEqual(heard, [
+    ['change', { rev: 3, author: 'Ann' }],
+    ['selectionchange', { text: 'Hi', empty: false }],
+    ['presence', { people: [{ name: 'Ann', color: '#aabbcc' }] }],
+    ['comment', { action: 'added', id: 1, author: 'Ann', text: 'Note' }],
+  ]);
+  // Another origin is never heard.
+  const before = heard.length;
+  page.fromOtherOrigin({ type: 'wordcraft:event', event: 'change', detail: { rev: 9 } }, frame);
+  assert.equal(heard.length, before);
 });

@@ -32,6 +32,8 @@ export interface WordCraftEditorOptions {
   readyTimeout?: number;
   /** Accessible title of the iframe. */
   title?: string;
+  /** Milliseconds an API call (run, getText…) may take before it rejects. Default 30000. */
+  callTimeout?: number;
   onReady?: (info: { version: string | null }) => void;
   /** Store the file. A rejected promise is reported as an `error` event. */
   onSave?: (file: SavedFile) => void | Promise<unknown>;
@@ -60,14 +62,60 @@ export interface CollabStatus {
   people: number;
 }
 
+export type DocumentFormat = 'docx' | 'odt' | 'rtf' | 'pdf' | 'html' | 'md' | 'txt';
+
+export interface ChangeDetail {
+  /** The document's revision (the shared revision when co-editing). */
+  rev: number;
+  /** Who made the edits. */
+  author: string;
+}
+
+export interface SelectionDetail {
+  text: string;
+  /** No text selected (a caret). */
+  empty: boolean;
+}
+
+export interface PresenceDetail {
+  /** The others in the document. */
+  people: { name: string; color: string }[];
+}
+
+export interface CommentDetail {
+  action: 'added' | 'resolved' | 'reopened' | 'deleted';
+  id: number;
+  author: string;
+  text: string;
+}
+
 export interface WordCraftEventMap {
   ready: CustomEvent<{ version: string | null }>;
   save: CustomEvent<SavedFile>;
   dirty: CustomEvent<{ dirty: boolean }>;
   error: CustomEvent<{ error: Error }>;
   collab: CustomEvent<CollabStatus>;
+  change: CustomEvent<ChangeDetail>;
+  selectionchange: CustomEvent<SelectionDetail>;
+  presence: CustomEvent<PresenceDetail>;
+  comment: CustomEvent<CommentDetail>;
 }
 
+/** Driving the editor from JavaScript; every call waits for `ready`. */
+export interface WordCraftApi {
+  /** Run any WordCraft command and get its result. */
+  run(command: string, params?: Record<string, unknown>): Promise<any>;
+  getText(): Promise<string>;
+  getDocument(format?: DocumentFormat): Promise<{ name: string; blob: Blob }>;
+  /** The document's structure as JSON. */
+  inspect(): Promise<any>;
+  insertText(text: string): Promise<void>;
+  select(text: string): Promise<void>;
+  /** Read only (Editing › Viewing) or editable again. */
+  setReadOnly(on?: boolean): Promise<void>;
+}
+
+export interface WordCraftEditor extends WordCraftApi {}
 export class WordCraftEditor extends EventTarget {
   constructor(container: string | HTMLElement, options?: WordCraftEditorOptions);
   readonly iframe: HTMLIFrameElement;
@@ -89,6 +137,7 @@ export class WordCraftEditor extends EventTarget {
 export function createEditor(container: string | HTMLElement, options?: WordCraftEditorOptions): WordCraftEditor;
 export function mimeType(name: string): string;
 
+export interface WordCraftEditorElement extends WordCraftApi {}
 export class WordCraftEditorElement extends HTMLElement {
   editor: WordCraftEditor | null;
   open(source: DocumentSource, name?: string): Promise<void>;

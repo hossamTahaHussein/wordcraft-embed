@@ -131,6 +131,7 @@ storage (S3, a database blob, …).
 | `webgl` | `false` | Force WebGL2 instead of WebGPU, for a misbehaving GPU driver |
 | `guardUnload` | `true` | Warn before the user leaves the page with unsaved changes |
 | `readyTimeout` | `60000` | Milliseconds to wait for the editor before `error` |
+| `callTimeout` | `30000` | Milliseconds an API call (`run`, `getText`, …) may take before it rejects |
 | `title` | `'Document editor'` | Accessible title of the iframe |
 | `onReady`, `onSave`, `onDirtyChange`, `onError` | | Callbacks. The same information arrives as events |
 
@@ -140,7 +141,36 @@ storage (S3, a database blob, …).
 | `await editor.open(source, name?)` | Open a URL, `File`, `Blob`, `ArrayBuffer` or `Uint8Array`. Waits for `ready` |
 | `editor.dirty` | `true` while there are unsaved changes |
 | `editor.focus()` / `editor.destroy()` | Focus the editor / remove it and stop listening |
-| events | `ready`, `save`, `dirty`, `error` (`CustomEvent`, data in `event.detail`). On `<wordcraft-editor>` they are prefixed `wordcraft-` and bubble |
+| events | `ready`, `save`, `dirty`, `error`, `collab`, and the API events below (`CustomEvent`, data in `event.detail`). On `<wordcraft-editor>` they are prefixed `wordcraft-` and bubble |
+
+### Driving the editor from JavaScript
+
+Every call returns a promise, waits for `ready`, and rejects with the editor's message when it
+fails (an unknown command, an edit while read only). In a co-edited document, edits made this
+way sync to everyone like typed ones.
+
+| Call | |
+|---|---|
+| `await editor.run(command, params?)` | Run any WordCraft command and get its result, e.g. `run('format.bold', { value: true })`, `run('insert.table', { rows: 2, cols: 3 })` |
+| `await editor.getText()` | The document's text |
+| `await editor.getDocument(format?)` | `{ name, blob }`: the document as `docx` (default), `odt`, `rtf`, `pdf`, `html`, `md` or `txt` |
+| `await editor.inspect()` | The document's structure as JSON: headings, paragraphs, tables, comments |
+| `await editor.insertText(text)` | Type text at the cursor, replacing the selection |
+| `await editor.select(text)` | Select the first occurrence of `text` |
+| `await editor.setReadOnly(on)` | Read only (Editing › Viewing) or editable again. Other people's edits still arrive while read only |
+
+| Event | `event.detail` |
+|---|---|
+| `change` | `{ rev, author }` after edits, at most once per frame. `author` is who made them; `rev` is the shared revision when co-editing |
+| `selectionchange` | `{ text, empty }` |
+| `presence` | `{ people: [{ name, color }] }`: the others in the document, `color` as CSS |
+| `comment` | `{ action, id, author, text }`, `action` one of `added`, `resolved`, `reopened`, `deleted` |
+
+```js
+editor.addEventListener('change', ({ detail }) => console.log(`${detail.author} edited (revision ${detail.rev})`));
+await editor.insertText('Quarterly report');
+const { blob } = await editor.getDocument('pdf');
+```
 
 ## Co-editing (several people, one document)
 
