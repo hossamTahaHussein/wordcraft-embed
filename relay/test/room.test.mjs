@@ -81,7 +81,7 @@ test('a member joining before revision 0 exists waits for it', async () => {
   r.join(b);
   assert.equal(b.got.length, 0, 'b must not be told to provide the document too');
   r.message('a', { t: 'Snapshot', rev: 0, doc: '{"v":0}' });
-  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 0, snapshot: '{"v":0}', ops: [], you: 'b', seen: 0, history: [] });
+  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 0, snapshot: '{"v":0}', ops: [], you: 'b', seen: 0, history: [], peers: [{ client: 'a', user: 'A', color: 0 }] });
   await done();
 });
 
@@ -143,7 +143,7 @@ test('a reconnecting member with haveRev gets only what it missed', async () => 
   await r.flush();
   const b = member('b');
   r.join(b, 1);
-  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 1, snapshot: null, ops: [r.log[1]], you: 'b' });
+  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 1, snapshot: null, ops: [r.log[1]], you: 'b', peers: [{ client: 'a', user: 'A', color: 0 }] });
   await done();
 });
 

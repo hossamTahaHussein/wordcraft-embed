@@ -19,10 +19,22 @@ export const LIMITS = {
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
+const PALETTE_SIZE = 12;
+
+/** A selection as story offsets (wordcraft_collab::proto::Anchor). */
+function validSel(sel) {
+  return (
+    !!sel &&
+    typeof sel === 'object' &&
+    (sel.story === 'body' || (sel.story && typeof sel.story === 'object' && isCount(sel.story.part))) &&
+    isCount(sel.anchor) &&
+    isCount(sel.head)
+  );
+}
+
 /** Whether `msg` has the shape of an op (wordcraft_collab::proto::Op); replicas can't decode one
  * that doesn't, and a revision nobody can apply would stall the document. */
 function wellFormed(msg) {
-  const sel = msg.sel;
   return (
     isCount(msg.seq) &&
     msg.seq > 0 &&
@@ -30,11 +42,7 @@ function wellFormed(msg) {
     OP_KINDS.has(msg.kind) &&
     typeof msg.cmd === 'string' &&
     msg.cmd.length <= 200 &&
-    !!sel &&
-    typeof sel === 'object' &&
-    (sel.story === 'body' || (sel.story && typeof sel.story === 'object' && isCount(sel.story.part))) &&
-    isCount(sel.anchor) &&
-    isCount(sel.head) &&
+    validSel(msg.sel) &&
     !!msg.ctx &&
     typeof msg.ctx === 'object' &&
     !Array.isArray(msg.ctx)
@@ -114,7 +122,10 @@ export class Room {
     if (old) old.close(4000, 'Replaced by a newer connection');
     member.bucket = { tokens: this.limits.opsPerSecond, at: this.now() };
     member.resyncAt = -Infinity;
+    member.color = old ? old.color : this.freeColor();
+    member.sel = old?.sel;
     this.members.set(member.client, member);
+    if (!old) this.broadcast({ t: 'Join', client: member.client, user: member.user, color: member.color }, member.client);
     if (!this.snapshot) {
       if (this.bootstrapper && this.bootstrapper !== member.client) {
         this.waiting.push(member.client);
@@ -129,12 +140,31 @@ export class Room {
     if (this.rev > this.savedRev && !this.saveTimer) this.scheduleSave();
   }
 
+  /** The lowest palette index no present member uses. */
+  freeColor() {
+    const used = new Set([...this.members.values()].map((m) => m.color));
+    for (let i = 0; i < PALETTE_SIZE; i++) if (!used.has(i)) return i;
+    return this.members.size % PALETTE_SIZE;
+  }
+
+  /** Send to every member but `except`. */
+  broadcast(msg, except) {
+    for (const m of this.members.values()) if (m.client !== except) m.send(msg);
+  }
+
+  /** The other members as a Welcome lists them. */
+  peersOf(client) {
+    return [...this.members.values()]
+      .filter((m) => m.client !== client)
+      .map((m) => (m.sel ? { client: m.client, user: m.user, color: m.color, sel: m.sel } : { client: m.client, user: m.user, color: m.color }));
+  }
+
   welcome(member, haveRev) {
     const base = this.snapshot?.rev ?? 0;
     if (Number.isInteger(haveRev) && haveRev >= base && haveRev <= this.durableRev) {
-      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.durableAfter(haveRev), you: member.client });
+      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.durableAfter(haveRev), you: member.client, peers: this.peersOf(member.client) });
     } else {
-      member.send({ t: 'Welcome', ...this.fromSnapshot(member), you: member.client });
+      member.send({ t: 'Welcome', ...this.fromSnapshot(member), you: member.client, peers: this.peersOf(member.client) });
     }
   }
 
@@ -153,7 +183,8 @@ export class Room {
    * reconnect may have replaced it). */
   leave(client, member) {
     if (member && this.members.get(client) !== member) return;
-    this.members.delete(client);
+    if (!this.members.delete(client)) return;
+    this.broadcast({ t: 'Leave', client });
     this.waiting = this.waiting.filter((c) => c !== client);
     if (this.snapshotFrom === client) this.snapshotFrom = null;
     if (this.bootstrapper === client && !this.snapshot) {
@@ -190,6 +221,11 @@ export class Room {
         return;
       case 'ResyncRequest':
         return this.resync(member);
+      case 'Presence':
+        // Where this person is: forwarded, kept for newcomers, never logged.
+        if (!validSel(msg.sel)) return;
+        member.sel = { story: msg.sel.story, anchor: msg.sel.anchor, head: msg.sel.head };
+        return this.broadcast({ t: 'Presence', client: member.client, user: member.user, color: member.color, sel: member.sel }, member.client);
     }
   }
 
