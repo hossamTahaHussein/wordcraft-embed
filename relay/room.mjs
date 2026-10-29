@@ -23,6 +23,13 @@ export const LIMITS = {
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 /** The commands a commenter may run (generated from the engine registry). */
 export const COMMENT_COMMANDS = new Set(JSON.parse(readFileSync(new URL('./comment-commands.json', import.meta.url), 'utf8')));
+/** The comment commands and the `commented` webhook action each one is. */
+const COMMENT_ACTIONS = {
+  'review.newComment': 'added',
+  'review.resolveComment': 'resolved',
+  'review.editComment': 'edited',
+  'review.deleteComment': 'deleted',
+};
 const REFUSED = {
   view: 'You can only view this document',
   comment: 'You can only comment on this document',
@@ -71,8 +78,11 @@ function wellFormed(msg) {
 const canHold = (m) => m.role === 'edit' && !m.agent;
 
 export class Room {
-  constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {} }) {
+  /** `events(type, detail)` hears what webhooks report: joined, left, saved, edited (one per
+   * op: { rev, name }), commented, restored. */
+  constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {}, events = () => {} }) {
     this.id = id;
+    this.events = events;
     this.store = store;
     this.now = now;
     this.setTimer = setTimer;
@@ -158,7 +168,10 @@ export class Room {
     member.sel = old?.sel;
     member.selRev = old?.selRev;
     this.members.set(member.client, member);
-    if (!old) this.broadcast({ t: 'Join', client: member.client, user: member.user, color: member.color }, member.client);
+    if (!old) {
+      this.broadcast({ t: 'Join', client: member.client, user: member.user, color: member.color }, member.client);
+      this.events('joined', { sub: member.sub, name: member.user, role: member.role, ...(member.agent ? { agent: true } : {}) });
+    }
     if (!this.snapshot) {
       if ((this.bootstrapper && this.bootstrapper !== member.client) || !canHold(member)) {
         this.waiting.push(member.client);
@@ -227,8 +240,10 @@ export class Room {
    * reconnect may have replaced it). */
   leave(client, member) {
     if (member && this.members.get(client) !== member) return;
+    const gone = this.members.get(client);
     if (!this.members.delete(client)) return;
     this.broadcast({ t: 'Leave', client });
+    this.events('left', { sub: gone.sub, name: gone.user });
     this.waiting = this.waiting.filter((c) => c !== client);
     if (this.snapshotFrom === client) this.snapshotFrom = null;
     if (this.bootstrapper === client && !this.snapshot) {
@@ -267,6 +282,7 @@ export class Room {
         if (Number.isInteger(msg.rev) && msg.rev > this.savedRev) {
           this.savedRev = Math.min(msg.rev, this.rev);
           this.store.writeMeta(this.id, { savedRev: this.savedRev });
+          this.events('saved', { rev: this.savedRev });
         }
         return;
       case 'ResyncRequest':
@@ -319,6 +335,9 @@ export class Room {
     this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
       this.durableRev = Math.max(this.durableRev, op.rev);
       for (const m of this.members.values()) m.send(op);
+      this.events('edited', { rev: op.rev, name: op.user });
+      const action = op.kind === 'cmd' && Object.hasOwn(COMMENT_ACTIONS, op.cmd) && COMMENT_ACTIONS[op.cmd];
+      if (action) this.events('commented', { action, by: op.user, rev: op.rev });
     });
     this.scheduleSave();
     if (this.rev - (this.snapshot?.rev ?? 0) >= this.limits.snapshotEvery && this.snapshotAskedAt < this.rev - this.limits.snapshotEvery + 1) {

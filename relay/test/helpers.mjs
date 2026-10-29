@@ -72,3 +72,44 @@ export async function room({ first = member('a'), events, limits, start = 0, dir
     },
   };
 }
+
+/** A WebSocket client of a relay at `url` that collects messages; `next(t)` waits for one. */
+export async function connect(url) {
+  const { WebSocket } = await import('ws');
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const got = [];
+    const waiters = [];
+    let isClosed = null;
+    ws.on('message', (data) => {
+      got.push(JSON.parse(data.toString()));
+      for (const w of waiters.splice(0)) w();
+    });
+    const closed = new Promise((r) =>
+      ws.on('close', (code, reason) => {
+        isClosed = { code, reason: reason.toString() };
+        for (const w of waiters.splice(0)) w();
+        r(isClosed);
+      }),
+    );
+    ws.on('error', reject);
+    ws.on('open', () =>
+      resolve({
+        ws,
+        got,
+        closed,
+        send: (m) => ws.send(JSON.stringify(m)),
+        async next(t) {
+          for (;;) {
+            const i = got.findIndex((m) => m.t === t);
+            if (i >= 0) return got.splice(i, 1)[0];
+            if (isClosed) throw new Error(`closed ${isClosed.code} ${isClosed.reason} while waiting for ${t}`);
+            await new Promise((r) => waiters.push(r));
+          }
+        },
+      }),
+    );
+  });
+}
+
+export const wsOp = (seq, fields = {}) => ({ t: 'Op', client: 'x', seq, base: 0, kind: 'cmd', cmd: 'text.insert', params: { text: 'x' }, sel: { story: 'body', anchor: 0, head: 0 }, ctx: {}, ...fields });
