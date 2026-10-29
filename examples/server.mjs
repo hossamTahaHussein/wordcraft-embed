@@ -11,8 +11,11 @@
 //   EDITOR_DIR=../upstream/dist/web node examples/server.mjs   # a co-editing build of WordCraft
 //
 // Co-editing (examples/collab.html): the relay listens on /relay of this same server, and
-// GET /api/token?doc=…&name=… hands out join tokens. A real site issues tokens only to signed-in
-// users, from its own backend, with a secret it keeps (RELAY_SECRET).
+// GET /api/token?doc=…&name=…&role=… hands out join tokens. A real site issues tokens only to
+// signed-in users, from its own backend, with a secret it keeps (RELAY_SECRET).
+//
+//   RELAY_API_KEY=…  turns on the relay's HTTP API (/api/docs/…) on this server
+//   WEBHOOK_URL=… WEBHOOK_SECRET=…  turn on the relay's webhooks
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
@@ -22,7 +25,7 @@ import { createGzip } from 'node:zlib';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRelay } from '../relay/server.mjs';
-import { issueToken } from '../relay/token.mjs';
+import { ROLES, issueToken } from '../relay/token.mjs';
 
 const root = resolve(fileURLToPath(import.meta.url), '../..');
 const port = Number(process.env.PORT) || 8080;
@@ -168,18 +171,21 @@ async function files(req, res, rawName) {
   return send(res, 405, 'Method not allowed');
 }
 
-/** Demo join tokens: anyone may edit any document. A real backend checks who is asking. */
+/** Demo join tokens: anyone may open any document in any role (`role`: edit, the default,
+ * comment or view). A real backend checks who is asking. */
 function token(req, res) {
   const q = new URL(req.url, 'http://localhost').searchParams;
   const doc = (q.get('doc') || 'demo').slice(0, 100);
   const name = (q.get('name') || 'Guest').slice(0, 60);
-  const t = issueToken(relaySecret, { doc, sub: `${name}-${randomBytes(4).toString('hex')}`, name, role: 'edit' });
+  const role = ROLES.includes(q.get('role')) ? q.get('role') : 'edit';
+  const t = issueToken(relaySecret, { doc, sub: `${name}-${randomBytes(4).toString('hex')}`, name, role });
   send(res, 200, JSON.stringify({ token: t }), 'application/json');
 }
 
 const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
   if (pathname === '/api/token') return token(req, res);
+  if (pathname.startsWith('/api/docs/') && relay.handle(req, res)) return;
   if (pathname === '/api/files' || pathname.startsWith('/api/files/')) {
     return files(req, res, pathname.slice('/api/files/'.length));
   }
@@ -188,7 +194,13 @@ const server = createServer(async (req, res) => {
   if (!file) return send(res, 404, 'Not found');
   serveFile(req, res, file);
 });
-await createRelay({ secret: relaySecret, dataDir: relayDir, server });
+const relay = await createRelay({
+  secret: relaySecret,
+  dataDir: relayDir,
+  server,
+  apiKey: process.env.RELAY_API_KEY,
+  webhook: { url: process.env.WEBHOOK_URL, secret: process.env.WEBHOOK_SECRET },
+});
 server.listen(port, host, () => {
   console.log(`WordCraft embed demo on http://${host}:${port}/`);
   console.log(`Saved documents go to ${filesDir}`);
