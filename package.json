@@ -16,7 +16,8 @@
   "wordcraftVersion": "0.12.0",
   "scripts": {
     "fetch-editor": "node scripts/fetch-editor.mjs",
-    "start": "node examples/server.mjs"
+    "start": "node examples/server.mjs",
+    "test": "node --test 'relay/test/*.test.mjs' 'test/*.test.mjs'"
   },
   "keywords": ["word", "docx", "editor", "word-processor", "wordcraft", "embed", "wasm"],
   "license": "MIT OR Apache-2.0",
