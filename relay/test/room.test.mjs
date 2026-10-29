@@ -90,6 +90,7 @@ test('ops broadcast to all including sender, stamped with rev and user', async (
   const b = member('b');
   r.join(b);
   r.message('a', op('a', 1));
+  await r.flush();
   const fromA = a.last('Op');
   const fromB = b.last('Op');
   assert.deepEqual([fromA.rev, fromA.user], [1, 'A']);
@@ -104,6 +105,7 @@ test('sequencing preserves per-client order', async () => {
   r.message('a', op('a', 1, '1'));
   r.message('b', op('b', 1, 'x'));
   r.message('a', op('a', 2, '2'));
+  await r.flush();
   const seen = a.got.filter((m) => m.t === 'Op').map((m) => `${m.client}${m.seq}@${m.rev}`);
   assert.deepEqual(seen, ['a1@1', 'b1@2', 'a2@3']);
   await done();
@@ -259,4 +261,46 @@ test('room full closes with 4409', async () => {
   r.join(late);
   assert.equal(late.closed?.code, 4409);
   await done();
+});
+
+test('an op is only broadcast once it is on disk: a crash never loses an op anyone saw', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wc-room-'));
+  const c = clock();
+  const r = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 50 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await r.load();
+  const a = member('a');
+  r.join(a);
+  r.message('a', { t: 'Snapshot', rev: 0, doc: '{"v":0}' });
+  r.message('a', op('a', 1, 'one'));
+  assert.equal(a.last('Op'), undefined, 'not broadcast before it is durable');
+  // Whenever a member has seen it, a fresh relay over the same data dir has it too.
+  await new Promise((resolve) => {
+    const check = setInterval(() => {
+      if (a.last('Op')) {
+        clearInterval(check);
+        resolve();
+      }
+    }, 5);
+  });
+  const crashed = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 50 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await crashed.load();
+  assert.equal(crashed.rev, 1);
+  await r.flush();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('flushing while a batch waits writes it and releases its broadcasts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wc-room-'));
+  const store = createStore(dir, { flushMs: 60_000 });
+  const r = new Room({ id: 'doc-1', store });
+  await r.load();
+  const a = member('a');
+  r.join(a);
+  r.message('a', { t: 'Snapshot', rev: 0, doc: '{}' });
+  r.message('a', op('a', 1, 'one'));
+  const flushed = await Promise.race([r.flush().then(() => 'flushed'), new Promise((res) => setTimeout(() => res('hung'), 2000))]);
+  assert.equal(flushed, 'flushed');
+  await new Promise((res) => setImmediate(res));
+  assert.equal(a.last('Op')?.rev, 1);
+  rmSync(dir, { recursive: true, force: true });
 });

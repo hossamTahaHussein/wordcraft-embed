@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export function createStore(dataDir, { flushMs = 100 } = {}) {
+export function createStore(dataDir, { flushMs = 20 } = {}) {
   const rooms = new Map();
 
   function dirOf(id) {
@@ -52,6 +52,15 @@ export function createStore(dataDir, { flushMs = 100 } = {}) {
     });
   }
 
+  /** Write the waiting batch now and resolve its ops' promise once it is synced. */
+  function releaseBatch(id) {
+    const s = state(id);
+    const release = s.release;
+    s.durable = null;
+    s.release = null;
+    return flushBuffer(id).then(() => release?.());
+  }
+
   return {
     /** @returns {Promise<{snapshot: {rev: number, doc: string} | null, ops: object[]}>} */
     async load(id) {
@@ -76,12 +85,18 @@ export function createStore(dataDir, { flushMs = 100 } = {}) {
       return { snapshot, ops };
     },
 
+    /** Queue an op; the promise resolves once it is written and synced. */
     append(id, op) {
       const s = state(id);
       s.buffer.push(op);
       if (flushMs <= 0) return flushBuffer(id);
-      if (!s.timer) s.timer = setTimeout(() => flushBuffer(id), flushMs);
-      return s.chain;
+      if (!s.durable) {
+        s.durable = new Promise((resolve) => {
+          s.release = resolve;
+          s.timer = setTimeout(() => releaseBatch(id), flushMs);
+        });
+      }
+      return s.durable;
     },
 
     /** Replace the snapshot and the ops after it. */
@@ -98,7 +113,7 @@ export function createStore(dataDir, { flushMs = 100 } = {}) {
     },
 
     flush(id) {
-      return flushBuffer(id);
+      return state(id).durable ? releaseBatch(id) : flushBuffer(id);
     },
   };
 }

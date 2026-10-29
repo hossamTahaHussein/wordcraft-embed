@@ -126,8 +126,11 @@ export class Room {
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
     this.log.push(op);
-    this.store.append(this.id, op);
-    for (const m of this.members.values()) m.send(op);
+    // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
+    // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
+    this.store.append(this.id, op).then(() => {
+      for (const m of this.members.values()) m.send(op);
+    });
     this.scheduleSave();
     if (this.rev - (this.snapshot?.rev ?? 0) >= this.limits.snapshotEvery && this.snapshotAskedAt < this.rev - this.limits.snapshotEvery + 1) {
       this.snapshotAskedAt = this.rev;
