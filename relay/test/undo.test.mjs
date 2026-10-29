@@ -116,14 +116,62 @@ test('a fresh resync asks the holder for a snapshot and resyncs from it', async 
   const late = member('late');
   r.join(late);
   r.message('a', op('a', 1));
+  r.message('a', op('a', 2, { kind: 'undo', cmd: 'collab.undo', params: { target: 1 } }));
   r.message('late', { t: 'ResyncRequest', have: 1, fresh: true });
   await r.flush();
   assert.equal(a.last('SnapshotRequest').t, 'SnapshotRequest', 'the holder is asked');
   assert.equal(late.all('Resync').length, 0, 'it waits for the fresh one');
-  r.message('a', { t: 'Snapshot', rev: 1, doc: '{"v":1}', history: [] });
+  r.message('a', { t: 'Snapshot', rev: 2, doc: '{"v":2}', history: [] });
   await r.flush();
   const resync = late.last('Resync');
-  assert.equal(resync.rev, 1);
-  assert.equal(resync.snapshot, '{"v":1}');
+  assert.equal(resync.rev, 2);
+  assert.equal(resync.snapshot, '{"v":2}');
+  await done();
+});
+
+test('a holder that needs a fresh snapshot gets one from another editor', async () => {
+  const { r, a, done } = await room();
+  const b = member('b');
+  r.join(b);
+  r.message('a', op('a', 1));
+  r.message('a', op('a', 2, { kind: 'undo', cmd: 'collab.undo', params: { target: 1 } }));
+  await r.flush();
+  r.message('a', { t: 'ResyncRequest', have: 2, fresh: true });
+  assert.equal(a.all('Resync').length, 0, 'not the stored snapshot, from before the undo');
+  assert.equal(a.all('SnapshotRequest').length, 0);
+  assert.equal(b.all('SnapshotRequest').length, 1, 'another editor is asked');
+  r.message('b', { t: 'Snapshot', rev: 2, doc: '{"v":2}', history: [] });
+  await r.flush();
+  assert.equal(a.last('Resync').rev, 2);
+  await done();
+});
+
+test('a fresh snapshot nobody sends falls back to the stored one', async () => {
+  const { r, c, done } = await room();
+  const late = member('late');
+  r.join(late);
+  r.message('a', op('a', 1));
+  r.message('a', op('a', 2, { kind: 'undo', cmd: 'collab.undo', params: { target: 1 } }));
+  await r.flush();
+  r.message('late', { t: 'ResyncRequest', have: 0, fresh: true });
+  assert.equal(late.all('Resync').length, 0);
+  c.advance(15_000);
+  assert.equal(late.last('Resync').rev, 0, 'the stored snapshot and the log after it');
+  await done();
+});
+
+test('fresh resyncs are rate limited, and only honoured after an undo or redo', async () => {
+  const { r, a, done } = await room();
+  const vic = member('vic', { role: 'view' });
+  r.join(vic);
+  r.message('a', op('a', 1));
+  await r.flush();
+  r.message('vic', { t: 'ResyncRequest', have: 0, fresh: true });
+  assert.equal(a.all('SnapshotRequest').length, 0, 'no undo: a plain resync');
+  assert.equal(vic.all('Resync').length, 1);
+  r.message('a', op('a', 2, { kind: 'undo', cmd: 'collab.undo', params: { target: 1 } }));
+  await r.flush();
+  for (let i = 0; i < 5; i++) r.message('vic', { t: 'ResyncRequest', have: 0, fresh: true });
+  assert.ok(a.all('SnapshotRequest').length <= 1, `at most one upload: ${a.all('SnapshotRequest').length}`);
   await done();
 });

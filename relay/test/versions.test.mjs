@@ -190,3 +190,21 @@ test('thinning removes the files of dropped versions', async () => {
   }
   await done();
 });
+
+test('a version answered at a later revision (others edited since the save) is kept at that revision', async () => {
+  const { r, a, b, dir, done } = await editing();
+  r.message('a', op('a', 1));
+  await r.flush();
+  r.message('a', { t: 'Saved', rev: 1 });
+  assert.equal(a.last('VersionRequest').rev, 1);
+  r.message('b', op('b', 1));
+  await r.flush();
+  r.message('a', { t: 'Version', rev: 3, doc: '{}' });
+  await settle(r);
+  assert.equal(existsSync(join(versionsDir(dir), '3.json')), false, 'never past what the relay has');
+  r.message('a', { t: 'Version', rev: 2, doc: '{"v":2}' });
+  await settle(r);
+  const v = JSON.parse(readFileSync(join(versionsDir(dir), '2.json'), 'utf8'));
+  assert.deepEqual([v.rev, v.doc, v.users], [2, '{"v":2}', ['A', 'B']]);
+  await done();
+});

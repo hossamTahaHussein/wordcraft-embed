@@ -114,3 +114,17 @@ test('the document a restore replaces is kept as a version first', async () => {
   assert.deepEqual(a.last('VersionList').versions.map((v) => v.rev), [2, 1]);
   await done();
 });
+
+test('after a restore the holder is asked for a snapshot, so the restored document leaves the log', async () => {
+  const { r, a, done } = await withVersion();
+  const asked = a.all('SnapshotRequest').length;
+  r.message('a', restore('a', 2, 1));
+  await until(() => a.all('SnapshotRequest').length > asked);
+  assert.equal(a.all('SnapshotRequest').length, asked + 1);
+  r.message('a', { t: 'Snapshot', rev: 2, doc: '{"v":1}', history: [] });
+  await r.flush();
+  const late = member('late');
+  r.join(late);
+  assert.deepEqual([late.got[0].rev, late.got[0].ops.length], [2, 0], 'newcomers start from the snapshot');
+  await done();
+});

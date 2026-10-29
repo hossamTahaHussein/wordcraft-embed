@@ -18,6 +18,8 @@ export const LIMITS = {
   idleSaveMs: 2000,
   maxSaveDelayMs: 10000,
   resyncEveryMs: 5000,
+  freshWaitMs: 15000,
+  versionWaitMs: 30000,
   maxHistory: 2000,
   versionEveryMs: 10 * 60 * 1000,
   maxVersions: 100,
@@ -432,14 +434,24 @@ export class Room {
     // restore reaches it).
     const holder = this.holder;
     if (holder && this.durableRev > (this.versions.at(-1)?.rev ?? 0)) {
-      this.versionAsk = { rev: this.durableRev, client: holder.client };
+      this.versionAsk = { rev: this.durableRev, client: holder.client, at: this.now() };
       holder.send({ t: 'VersionRequest', rev: this.durableRev });
     }
     this.held = [];
     this.store.readVersion(this.id, version).then((v) => {
       if (typeof v?.doc === 'string') {
         const op = this.sequence(member, { ...msg, params: { ...msg.params, version, doc: v.doc } });
-        op.durable.then(() => this.events('restored', { rev: op.rev, version }));
+        op.durable.then(() => {
+          this.events('restored', { rev: op.rev, version });
+          // The restore carries a whole document: a snapshot after it takes it out of the log,
+          // so what newcomers and resyncs are sent stays small.
+          const source = this.holder ?? (this.members.get(member.client) === member ? member : null);
+          if (source && !this.snapshotFrom) {
+            this.snapshotAskedAt = this.rev;
+            this.snapshotFrom = source.client;
+            source.send({ t: 'SnapshotRequest' });
+          }
+        });
       } else {
         refuse();
       }
@@ -517,6 +529,8 @@ export class Room {
 
   /** Resync the replicas waiting for a fresh snapshot from the one there is now. */
   answerFresh() {
+    this.clearTimer(this.freshTimer);
+    this.freshTimer = null;
     for (const c of this.freshWaiting) {
       const m = this.members.get(c);
       if (m && this.snapshot) {
@@ -597,14 +611,19 @@ export class Room {
     if (newest && rev <= newest.rev) return;
     const othersEditing = [...this.members.values()].some((m) => m !== holder && m.role === 'edit');
     if (newest && this.now() - Date.parse(newest.at) < this.limits.versionEveryMs && othersEditing) return;
-    this.versionAsk = { rev, client: holder.client };
+    // A request still waiting (the document a restore replaces, say) isn't replaced.
+    if (this.versionAsk && this.now() - this.versionAsk.at < this.limits.versionWaitMs) return;
+    this.versionAsk = { rev, client: holder.client, at: this.now() };
     holder.send({ t: 'VersionRequest', rev });
   }
 
   takeVersion(member, msg) {
     const ask = this.versionAsk;
-    if (!ask || ask.client !== member.client || msg.rev !== ask.rev || typeof msg.doc !== 'string') return;
+    // The document at the revision asked for or later: others may have edited since the save.
+    if (!ask || ask.client !== member.client || !Number.isSafeInteger(msg.rev) || msg.rev < ask.rev || msg.rev > this.durableRev) return;
+    if (typeof msg.doc !== 'string') return;
     this.versionAsk = null;
+    ask.rev = msg.rev;
     const users = [...new Set(this.editedSince.filter(([rev]) => rev <= ask.rev).map(([, name]) => name))];
     this.editedSince = this.editedSince.filter(([rev]) => rev > ask.rev);
     const version = { rev: ask.rev, at: new Date(this.now()).toISOString(), users, doc: msg.doc };
@@ -625,16 +644,32 @@ export class Room {
   }
 
   /** A replica that can't apply an edit from what the stored snapshot holds (an undo of an
-   * edit from before it joined): the lease holder uploads a snapshot now, then it starts again
-   * from that. Without another editor to ask, the stored snapshot. */
+   * edit from before it joined): another editor's replica uploads a snapshot now (the holder's,
+   * unless it is the one asking), then it starts again from that. Only right after an undo or
+   * redo, at most once per `resyncEveryMs` each; without another editor to ask, or no answer
+   * within `freshWaitMs`, the stored snapshot. */
   freshResync(member) {
-    const holder = this.holder;
-    if (!holder || holder.client === member.client) return this.resync(member);
+    if (this.now() - member.resyncAt < this.limits.resyncEveryMs) return;
+    const undone = this.log.some((o) => o.kind === 'undo' || o.kind === 'redo');
+    const others = [...this.members.values()].filter((m) => m !== member && canHold(m));
+    const source = others.includes(this.holder) ? this.holder : others[0];
+    if (!undone || !source) {
+      if (undone) console.warn(`relay: ${this.id}: no other editor to send ${member.client} a fresh snapshot; resyncing from the stored one`);
+      return this.resync(member);
+    }
+    member.resyncAt = this.now();
     this.freshWaiting.add(member.client);
     if (this.snapshotFrom) return;
     this.snapshotAskedAt = this.rev;
-    this.snapshotFrom = holder.client;
-    holder.send({ t: 'SnapshotRequest' });
+    this.snapshotFrom = source.client;
+    source.send({ t: 'SnapshotRequest' });
+    this.clearTimer(this.freshTimer);
+    this.freshTimer = this.setTimer(() => {
+      if (!this.freshWaiting.size) return;
+      console.warn(`relay: ${this.id}: no fresh snapshot came; resyncing from the stored one`);
+      this.snapshotFrom = null;
+      this.answerFresh();
+    }, this.limits.freshWaitMs);
   }
 
   resync(member) {
