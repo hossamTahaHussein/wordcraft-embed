@@ -54,6 +54,9 @@ export function thinVersions(list, now, max = LIMITS.maxVersions) {
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 /** The commands a commenter may run (generated from the engine registry). */
 export const COMMENT_COMMANDS = new Set(JSON.parse(readFileSync(new URL('./comment-commands.json', import.meta.url), 'utf8')));
+/** What a suggester may run besides comments: the commands whose whole effect the engine records
+ * as a tracked change (the engine's `SUGGEST_COMMANDS`, proved by a test that Reject All takes each back). */
+export const SUGGEST_COMMANDS = new Set(JSON.parse(readFileSync(new URL('./suggest-commands.json', import.meta.url), 'utf8')));
 /** The comment commands and the `commented` webhook action each one is. */
 const COMMENT_ACTIONS = {
   'review.newComment': 'added',
@@ -67,8 +70,6 @@ const REFUSED = {
   comment: 'You can only comment on this document',
   suggest: 'You can only suggest changes in this document',
 };
-/** What a suggester may not run: deciding on suggestions, or switching their tracking off. */
-const SUGGESTER_REFUSED = new Set(['review.accept', 'review.acceptAll', 'review.reject', 'review.rejectAll', 'review.trackChanges']);
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
 const PALETTE_SIZE = 12;
@@ -379,11 +380,11 @@ export class Room {
   refusal(member, msg) {
     if (member.role === 'view') return REFUSED.view;
     if (member.role === 'suggest') {
-      // Every edit tracked (`ctx.track`), and comments; no restores.
+      // Comments, and edits the engine records whole as suggestions, tracked (`ctx.track`); no restores.
       const allowed =
         msg.kind === 'undo' ||
         msg.kind === 'redo' ||
-        (msg.kind === 'cmd' && (COMMENT_COMMANDS.has(msg.cmd) || (msg.ctx?.track === true && !SUGGESTER_REFUSED.has(msg.cmd))));
+        (msg.kind === 'cmd' && (COMMENT_COMMANDS.has(msg.cmd) || (msg.ctx?.track === true && SUGGEST_COMMANDS.has(msg.cmd))));
       if (!allowed) return REFUSED.suggest;
     }
     if (member.role === 'comment') {

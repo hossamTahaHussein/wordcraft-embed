@@ -20,6 +20,7 @@
     "scripts",
     "relay/*.mjs",
     "relay/comment-commands.json",
+    "relay/suggest-commands.json",
     "README.md",
     "LICENSE-MIT",
     "LICENSE-APACHE"

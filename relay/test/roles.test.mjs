@@ -145,3 +145,28 @@ test('a suggester may make tracked edits and comments only', async () => {
   assert.deepEqual(s.all('Refused').map((x) => [x.seq, x.reason]), [2, 3, 4, 6].map((n) => [n, 'You can only suggest changes in this document']));
   await done();
 });
+
+test('a suggester runs only the commands the engine can track (suggest-commands.json), tracked', async () => {
+  const { r, a, done } = await room();
+  const s = member('s', { role: 'suggest' });
+  r.join(s);
+  const allowed = JSON.parse(readFileSync(new URL('../suggest-commands.json', import.meta.url), 'utf8'));
+  assert.ok(allowed.includes('text.insert') && allowed.includes('format.bold'));
+  let seq = 0;
+  for (const cmd of allowed) r.message('s', op('s', ++seq, { cmd, params: {}, ctx: { track: true } }));
+  const tracked = seq;
+  // Real edits the engine cannot record as suggestions: refused even with ctx.track.
+  for (const cmd of ['layout.margins', 'review.restrict', 'table.insert', 'style.modify', 'review.accept', 'collab.anything']) {
+    r.message('s', op('s', ++seq, { cmd, params: { top: 1, mode: 'none', stop: true }, ctx: { track: true } }));
+  }
+  r.message('s', op('s', ++seq, { cmd: 'format.bold', params: {}, ctx: {} }));
+  r.message('s', op('s', ++seq, { cmd: 'review.newComment', params: { text: 'hm' } }));
+  await r.flush();
+  assert.equal(a.all('Op').length, tracked + 1, 'the tracked commands and the comment');
+  assert.deepEqual(
+    s.all('Refused').map((x) => x.seq),
+    Array.from({ length: 7 }, (_, i) => tracked + 1 + i),
+  );
+  assert.ok(s.all('Refused').every((x) => x.reason === 'You can only suggest changes in this document'));
+  await done();
+});
