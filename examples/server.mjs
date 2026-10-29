@@ -5,8 +5,9 @@
 //   1. the editor's static files on the site's own origin (here /wordcraft/), .wasm as application/wasm
 //   2. somewhere for onSave to put the file (here PUT /api/files/<name>)
 //
-//   node examples/server.mjs            # http://localhost:8080
+//   node examples/server.mjs            # http://127.0.0.1:8080 (this machine only)
 //   PORT=3000 FILES_DIR=./docs node examples/server.mjs
+//   HOST=0.0.0.0 node examples/server.mjs   # other machines too (the demo has no logins)
 
 import { createServer } from 'node:http';
 import { createReadStream, mkdirSync, readdirSync, statSync } from 'node:fs';
@@ -17,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(fileURLToPath(import.meta.url), '../..');
 const port = Number(process.env.PORT) || 8080;
+const host = process.env.HOST || '127.0.0.1';
 const filesDir = resolve(process.env.FILES_DIR || join(root, 'examples', 'files'));
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS = new Set(['.docx', '.docm', '.dotx', '.doc', '.odt', '.rtf', '.pdf', '.html', '.md', '.tex', '.txt', '.png']);
@@ -82,7 +84,7 @@ function send(res, status, body, type = 'text/plain; charset=utf-8') {
   res.end(body);
 }
 
-function serveFile(req, res, file) {
+function serveFile(req, res, file, { stored = false } = {}) {
   let stats;
   try {
     stats = statSync(file);
@@ -95,6 +97,13 @@ function serveFile(req, res, file) {
   }
   const ext = extname(file).toLowerCase();
   const headers = { 'Content-Type': TYPES[ext] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff' };
+  if (stored) {
+    // Anyone can store a file here, so it never runs as a page on this origin (an uploaded .html
+    // would otherwise be stored XSS next to the editor): plain bytes, a download, sandboxed.
+    headers['Content-Type'] = 'application/octet-stream';
+    headers['Content-Disposition'] = `attachment; filename*=UTF-8''${encodeURIComponent(file.split(sep).pop())}`;
+    headers['Content-Security-Policy'] = "sandbox; default-src 'none'";
+  }
   // Hashed editor assets never change; pages revalidate.
   headers['Cache-Control'] = /-[0-9a-f]{16}(_bg)?\.(wasm|js)$/.test(file) ? 'public, max-age=31536000, immutable' : 'no-cache';
   const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '') && ['.wasm', '.js', '.html'].includes(ext);
@@ -132,7 +141,7 @@ async function files(req, res, rawName) {
   const name = safeName(rawName);
   if (!name) return send(res, 400, 'Bad file name');
   const file = join(filesDir, name);
-  if (req.method === 'GET' || req.method === 'HEAD') return serveFile(req, res, file);
+  if (req.method === 'GET' || req.method === 'HEAD') return serveFile(req, res, file, { stored: true });
   if (req.method === 'PUT') {
     try {
       const body = await readBody(req);
@@ -157,7 +166,7 @@ createServer(async (req, res) => {
   const file = staticFile(pathname);
   if (!file) return send(res, 404, 'Not found');
   serveFile(req, res, file);
-}).listen(port, () => {
-  console.log(`WordCraft embed demo on http://localhost:${port}/`);
+}).listen(port, host, () => {
+  console.log(`WordCraft embed demo on http://${host}:${port}/`);
   console.log(`Saved documents go to ${filesDir}`);
 });
