@@ -23,6 +23,16 @@ const MESSAGE = {
   save: 'wordcraft:save',
   dirty: 'wordcraft:dirty',
   failed: 'wordcraft:failed',
+  collab: 'wordcraft:collab',
+  collabStatus: 'wordcraft:collab.status',
+};
+
+/** Relay close codes after which reconnecting can't help. */
+const PERMANENT_CLOSE = {
+  4400: 'the editor sent a bad client id',
+  4401: 'not allowed to edit this document (the join token was refused)',
+  4403: 'not allowed to edit this document (role)',
+  4409: 'this document has too many people in it',
 };
 
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
@@ -80,7 +90,7 @@ async function toDocument(source, name) {
 }
 
 /** The editor page's URL with the host-mode query flags. */
-function editorUrl(src, { author, webgl }) {
+function editorUrl(src, { author, webgl, collab, docName }) {
   const url = new URL(src, location.href);
   if (url.origin !== location.origin) {
     throw new Error(
@@ -91,6 +101,10 @@ function editorUrl(src, { author, webgl }) {
   url.searchParams.set('host', 'parent');
   if (author) url.searchParams.set('author', author);
   if (webgl) url.searchParams.set('webgl', '');
+  if (collab) {
+    url.searchParams.set('collab', '1');
+    if (docName) url.searchParams.set('docName', docName);
+  }
   return url;
 }
 
@@ -102,6 +116,7 @@ function editorUrl(src, { author, webgl }) {
  * - `save`   { name, bytes, blob, saveAs }   the user saved or exported a file (see onSave)
  * - `dirty`  { dirty }                       unsaved changes appeared or went away
  * - `error`  { error }                       the editor couldn't start, or onSave failed
+ * - `collab` { connected, pending, rev }     co-editing: connection and unsent edits changed
  */
 export class WordCraftEditor extends EventTarget {
   /**
@@ -119,6 +134,10 @@ export class WordCraftEditor extends EventTarget {
    * @param {(info: {version: string}) => void} [options.onReady]
    * @param {(dirty: boolean) => void} [options.onDirtyChange]
    * @param {(error: Error) => void} [options.onError]
+   * @param {{url: string, token: string | (() => string | Promise<string>)}} [options.collab]
+   *   co-edit through a relay (relay/server.mjs): its WebSocket URL and a join token from your
+   *   backend (a function is called again for each reconnect). Only the first person's
+   *   `document` is opened; everyone else gets the shared copy.
    */
   constructor(container, options = {}) {
     super();
@@ -145,7 +164,12 @@ export class WordCraftEditor extends EventTarget {
       });
     }
 
-    const url = editorUrl(this.options.src, this.options);
+    const docName =
+      this.options.documentName ||
+      (typeof this.options.document === 'string' ? nameFromUrl(this.options.document) : this.options.document?.name) ||
+      undefined;
+    const url = editorUrl(this.options.src, { ...this.options, docName });
+    this.docName = docName;
     this.origin = url.origin;
 
     this.iframe = document.createElement('iframe');
@@ -182,7 +206,10 @@ export class WordCraftEditor extends EventTarget {
 
     host.appendChild(this.iframe);
 
-    if (this.options.document != null) {
+    if (this.options.collab) {
+      this._collab = new CollabLink(this, this.options.collab);
+      this.ready.then(() => this._collab?.connect(), () => {});
+    } else if (this.options.document != null) {
       this.open(this.options.document, this.options.documentName).catch((error) => this._emit('error', { error }));
     }
   }
@@ -210,6 +237,8 @@ export class WordCraftEditor extends EventTarget {
     clearTimeout(this._readyTimer);
     window.removeEventListener('message', this._onMessage);
     window.removeEventListener('beforeunload', this._onBeforeUnload);
+    this._collab?.stop();
+    this._collab = null;
     this.iframe.remove();
     this._rejectReady(new Error('WordCraft: the editor was destroyed'));
   }
@@ -237,6 +266,12 @@ export class WordCraftEditor extends EventTarget {
         this._emit('save', { name, bytes, blob, saveAs: Boolean(data.saveAs) });
         break;
       }
+      case MESSAGE.collab:
+        if (typeof data.msg === 'string') this._collab?.toRelay(data.msg);
+        break;
+      case MESSAGE.collabStatus:
+        this._collab?.status(data);
+        break;
       case MESSAGE.failed:
         this._fail(new Error(`WordCraft couldn't start: ${data.error || 'unknown error'}`));
         break;
@@ -254,6 +289,121 @@ export class WordCraftEditor extends EventTarget {
   }
 }
 
+/**
+ * Co-editing: one WebSocket to the relay, carrying messages between it and the editor frame.
+ * The editor's replica does the real work (and resends unconfirmed edits after a reconnect);
+ * this only connects, reconnects, and opens the document for the first person.
+ */
+class CollabLink {
+  constructor(editor, { url, token, WebSocket: WS = globalThis.WebSocket, retryMs = [500, 10_000] }) {
+    this.editor = editor;
+    this.url = url;
+    this.token = token;
+    this.WS = WS;
+    this.retry = retryMs;
+    this.delay = retryMs[0];
+    // A relay client id: letters and digits only.
+    this.client = (globalThis.crypto?.randomUUID?.() || String(Math.random()).slice(2) + Date.now()).replace(/[^A-Za-z0-9]/g, '');
+    this.ws = null;
+    this.stopped = false;
+    this.rev = null;
+    this.pending = 0;
+    this.connected = false;
+    this.onHidden = () => {
+      // Leaving or hiding the page with unsaved changes: save now (best effort; autosave runs
+      // every few seconds anyway).
+      if (globalThis.document?.visibilityState === 'hidden' && editor.dirty) this.toEditor(JSON.stringify({ t: 'Save' }));
+    };
+    globalThis.document?.addEventListener?.('visibilitychange', this.onHidden);
+  }
+
+  async connect() {
+    if (this.stopped) return;
+    let token;
+    try {
+      token = typeof this.token === 'function' ? await this.token() : this.token;
+    } catch (error) {
+      this.editor._emit('error', { error: new Error(`WordCraft: couldn't get a join token: ${error.message || error}`) });
+      return this.reconnectLater();
+    }
+    if (this.stopped) return;
+    const ws = new this.WS(this.url);
+    this.ws = ws;
+    ws.onopen = () => {
+      this.delay = this.retry[0];
+      const hello = { t: 'hello', token, client: this.client };
+      if (this.rev !== null) hello.haveRev = this.rev;
+      ws.send(JSON.stringify(hello));
+      this.setConnected(true);
+    };
+    ws.onmessage = (event) => this.fromRelay(String(event.data));
+    ws.onclose = (event) => {
+      if (this.ws !== ws) return;
+      this.ws = null;
+      this.setConnected(false);
+      const permanent = PERMANENT_CLOSE[event.code];
+      if (permanent) {
+        this.editor._emit('error', { error: new Error(`WordCraft: ${permanent}`) });
+        return;
+      }
+      this.reconnectLater();
+    };
+    ws.onerror = () => {};
+  }
+
+  reconnectLater() {
+    if (this.stopped) return;
+    setTimeout(() => this.connect(), this.delay);
+    this.delay = Math.min(this.delay * 2, this.retry[1]);
+  }
+
+  fromRelay(text) {
+    // The first person (no snapshot yet) opens the document; everyone else gets the shared copy.
+    if (text.startsWith('{"t":"Welcome"')) {
+      try {
+        const welcome = JSON.parse(text);
+        if (welcome.snapshot === null && this.rev === null && this.editor.options.document != null) {
+          this.editor.open(this.editor.options.document, this.editor.docName).catch((error) => this.editor._emit('error', { error }));
+        }
+      } catch {}
+    }
+    this.toEditor(text);
+  }
+
+  toEditor(msg) {
+    if (this.editor.destroyed) return;
+    this.editor.iframe.contentWindow.postMessage({ type: MESSAGE.collab, msg }, this.editor.origin);
+  }
+
+  /** A message from the editor for the relay; dropped while disconnected (the replica resends its edits). */
+  toRelay(msg) {
+    if (this.ws && this.ws.readyState === (this.WS.OPEN ?? 1)) this.ws.send(msg);
+  }
+
+  status({ pending, rev }) {
+    if (Number.isInteger(rev)) this.rev = rev;
+    if (Number.isInteger(pending)) this.pending = pending;
+    this.emit();
+  }
+
+  setConnected(on) {
+    this.connected = on;
+    this.emit();
+  }
+
+  emit() {
+    this.editor._emit('collab', { connected: this.connected, pending: this.pending, rev: this.rev });
+  }
+
+  stop() {
+    this.stopped = true;
+    globalThis.document?.removeEventListener?.('visibilitychange', this.onHidden);
+    const ws = this.ws;
+    this.ws = null;
+    ws?.close();
+  }
+}
+
 /** Mount an editor; the same as `new WordCraftEditor(container, options)`. */
 export function createEditor(container, options) {
   return new WordCraftEditor(container, options);
@@ -267,7 +417,10 @@ export function createEditor(container, options) {
  * wordcraft-error. Methods: open(source, name), focus(). Property: editor (the WordCraftEditor).
  * Give the element a height; it is a block that the editor fills.
  */
-export class WordCraftEditorElement extends HTMLElement {
+// Server-side rendering (Next.js, Nuxt…) imports this module where there is no DOM.
+const ElementBase = typeof HTMLElement === 'undefined' ? class {} : HTMLElement;
+
+export class WordCraftEditorElement extends ElementBase {
   static get observedAttributes() {
     return ['document'];
   }

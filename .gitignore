@@ -3,3 +3,4 @@ editor/
 examples/files/
 .wordcraft-web-*/
 .playwright-mcp/
+examples/relay-data/

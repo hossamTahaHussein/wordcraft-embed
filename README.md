@@ -142,6 +142,57 @@ storage (S3, a database blob, …).
 | `editor.focus()` / `editor.destroy()` | Focus the editor / remove it and stop listening |
 | events | `ready`, `save`, `dirty`, `error` (`CustomEvent`, data in `event.detail`). On `<wordcraft-editor>` they are prefixed `wordcraft-` and bubble |
 
+## Co-editing (several people, one document)
+
+Up to about 20 people can edit the same document at once. Each person sees their own typing
+instantly and everyone else's within a network round trip. The document is saved automatically
+a few seconds after typing stops, through the same `onSave`.
+
+It needs three things:
+
+1. **A co-editing build of WordCraft** in place of the official `editor/`. Build the `co-editing`
+   branch of our WordCraft fork (`cd apps/wordcraft-web && trunk build --release`) and serve
+   its `dist/web` as `/wordcraft/`. The official release ignores `collab`.
+2. **The relay** (`relay/server.mjs`, Node 18+, one dependency: `ws`). It never reads documents;
+   it puts edits in order, keeps the session on disk (`DATA_DIR`) and chooses who autosaves.
+   Run it on its own (`RELAY_SECRET=… DATA_DIR=./relay-data node relay/server.mjs`, then proxy
+   `wss://yoursite/relay` to it) or inside your Node server (`createRelay({ secret, dataDir, server })`).
+3. **Join tokens from your backend.** Only your site knows who is signed in, so it issues a short
+   token per user and document, signed with `RELAY_SECRET`:
+
+```js
+import { issueToken } from 'wordcraft-embed/relay/token.mjs';
+app.get('/api/wordcraft-token', requireLogin, (req, res) => {
+  res.json({ token: issueToken(process.env.RELAY_SECRET, { doc: req.query.doc, sub: req.user.id, name: req.user.name, role: 'edit' }) });
+});
+```
+
+(Any language can do this: it is a standard HS256 JWT with claims `doc`, `sub`, `name`, `role`,
+`iat`, `exp`, valid for at most 24 hours.)
+
+Then add `collab` to the editor:
+
+```js
+new WordCraftEditor('#editor', {
+  src: '/wordcraft/',
+  author: user.name,
+  document: `/files/${id}.docx`,         // opened only by the first person in the session
+  documentName: `${id}.docx`,
+  collab: {
+    url: 'wss://yoursite.com/relay',
+    token: async () => (await (await fetch(`/api/wordcraft-token?doc=${id}`)).json()).token,
+  },
+  onSave: ({ name, blob }) => fetch(`/files/${name}`, { method: 'PUT', body: blob }),
+});
+```
+
+`editor.addEventListener('collab', e => …)` reports `{ connected, pending, rev }` for a
+"Saving… / All changes synced / Offline" indicator. The demo (`npm start` with
+`EDITOR_DIR` pointing at the fork's build) has a working page at `/collab.html?doc=demo`.
+
+Not yet in this version: other people's cursors and a list of who is present, Undo while
+co-editing (it is greyed out), roles other than editor, and version history.
+
 ## Limits to know
 
 - **Saving is started by the user.** The editor protocol has no "give me the document now"

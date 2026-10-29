@@ -13,7 +13,7 @@ let banner = '';
 
 before(async () => {
   filesDir = mkdtempSync(join(tmpdir(), 'wc-files-'));
-  server = spawn(process.execPath, ['examples/server.mjs'], { env: { ...process.env, PORT: String(PORT), FILES_DIR: filesDir }, stdio: 'pipe' });
+  server = spawn(process.execPath, ['examples/server.mjs'], { env: { ...process.env, PORT: String(PORT), FILES_DIR: filesDir, RELAY_DATA_DIR: join(filesDir, 'relay') }, stdio: 'pipe' });
   await new Promise((resolve, reject) => {
     server.stdout.on('data', (d) => {
       banner += d.toString();
@@ -47,4 +47,17 @@ test('stored .docx still downloads with its bytes', async () => {
 
 test('listens on loopback only by default', () => {
   assert.match(banner, /demo on http:\/\/127\.0\.0\.1:/);
+});
+
+test('a token from /api/token joins the relay on /relay', async () => {
+  const { WebSocket } = await import('ws');
+  const { token } = await (await fetch(`${base}/api/token?doc=t1&name=Ann`)).json();
+  const ws = new WebSocket(`ws://127.0.0.1:${PORT}/relay`);
+  const welcome = await new Promise((resolve, reject) => {
+    ws.on('open', () => ws.send(JSON.stringify({ t: 'hello', token, client: 'c1' })));
+    ws.on('message', (d) => resolve(JSON.parse(d.toString())));
+    ws.on('close', (code) => reject(new Error(`closed ${code}`)));
+  });
+  ws.close();
+  assert.deepEqual([welcome.t, welcome.you], ['Welcome', 'c1']);
 });

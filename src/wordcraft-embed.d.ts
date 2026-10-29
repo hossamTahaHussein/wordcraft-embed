@@ -35,6 +35,25 @@ export interface WordCraftEditorOptions {
   onSave?: (file: SavedFile) => void | Promise<unknown>;
   onDirtyChange?: (dirty: boolean) => void;
   onError?: (error: Error) => void;
+  /**
+   * Co-edit through a relay (`relay/server.mjs`). Only the first person's `document` is opened;
+   * everyone who joins later gets the shared copy. Saves (autosave every few seconds, Ctrl+S)
+   * come through `onSave` as usual.
+   */
+  collab?: {
+    /** The relay's WebSocket URL, e.g. `wss://example.com/relay`. */
+    url: string;
+    /** A join token from your backend; a function is called again for every reconnect. */
+    token: string | (() => string | Promise<string>);
+  };
+}
+
+export interface CollabStatus {
+  connected: boolean;
+  /** Edits made here that the relay hasn't confirmed yet. */
+  pending: number;
+  /** The last confirmed revision, or null before joining. */
+  rev: number | null;
 }
 
 export interface WordCraftEventMap {
@@ -42,6 +61,7 @@ export interface WordCraftEventMap {
   save: CustomEvent<SavedFile>;
   dirty: CustomEvent<{ dirty: boolean }>;
   error: CustomEvent<{ error: Error }>;
+  collab: CustomEvent<CollabStatus>;
 }
 
 export class WordCraftEditor extends EventTarget {

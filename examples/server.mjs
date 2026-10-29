@@ -8,18 +8,29 @@
 //   node examples/server.mjs            # http://127.0.0.1:8080 (this machine only)
 //   PORT=3000 FILES_DIR=./docs node examples/server.mjs
 //   HOST=0.0.0.0 node examples/server.mjs   # other machines too (the demo has no logins)
+//   EDITOR_DIR=../upstream/dist/web node examples/server.mjs   # a co-editing build of WordCraft
+//
+// Co-editing (examples/collab.html): the relay listens on /relay of this same server, and
+// GET /api/token?doc=…&name=… hands out join tokens. A real site issues tokens only to signed-in
+// users, from its own backend, with a secret it keeps (RELAY_SECRET).
 
+import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createReadStream, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { rename, writeFile } from 'node:fs/promises';
 import { createGzip } from 'node:zlib';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRelay } from '../relay/server.mjs';
+import { issueToken } from '../relay/token.mjs';
 
 const root = resolve(fileURLToPath(import.meta.url), '../..');
 const port = Number(process.env.PORT) || 8080;
 const host = process.env.HOST || '127.0.0.1';
 const filesDir = resolve(process.env.FILES_DIR || join(root, 'examples', 'files'));
+const editorDir = resolve(process.env.EDITOR_DIR || join(root, 'editor'));
+const relaySecret = process.env.RELAY_SECRET || randomBytes(32).toString('hex');
+const relayDir = resolve(process.env.RELAY_DATA_DIR || join(root, 'examples', 'relay-data'));
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 const DOCUMENT_EXTENSIONS = new Set(['.docx', '.docm', '.dotx', '.doc', '.odt', '.rtf', '.pdf', '.html', '.md', '.tex', '.txt', '.png']);
 
@@ -27,7 +38,7 @@ mkdirSync(filesDir, { recursive: true });
 
 // URL prefix → folder.
 const mounts = [
-  ['/wordcraft/', join(root, 'editor')],
+  ['/wordcraft/', editorDir],
   ['/sdk/', join(root, 'src')],
   ['/', join(root, 'examples')],
 ];
@@ -157,8 +168,18 @@ async function files(req, res, rawName) {
   return send(res, 405, 'Method not allowed');
 }
 
-createServer(async (req, res) => {
+/** Demo join tokens: anyone may edit any document. A real backend checks who is asking. */
+function token(req, res) {
+  const q = new URL(req.url, 'http://localhost').searchParams;
+  const doc = (q.get('doc') || 'demo').slice(0, 100);
+  const name = (q.get('name') || 'Guest').slice(0, 60);
+  const t = issueToken(relaySecret, { doc, sub: `${name}-${randomBytes(4).toString('hex')}`, name, role: 'edit' });
+  send(res, 200, JSON.stringify({ token: t }), 'application/json');
+}
+
+const server = createServer(async (req, res) => {
   const { pathname } = new URL(req.url, 'http://localhost');
+  if (pathname === '/api/token') return token(req, res);
   if (pathname === '/api/files' || pathname.startsWith('/api/files/')) {
     return files(req, res, pathname.slice('/api/files/'.length));
   }
@@ -166,7 +187,10 @@ createServer(async (req, res) => {
   const file = staticFile(pathname);
   if (!file) return send(res, 404, 'Not found');
   serveFile(req, res, file);
-}).listen(port, host, () => {
+});
+await createRelay({ secret: relaySecret, dataDir: relayDir, server });
+server.listen(port, host, () => {
   console.log(`WordCraft embed demo on http://${host}:${port}/`);
   console.log(`Saved documents go to ${filesDir}`);
+  console.log(`Editor files from ${editorDir}; co-editing relay on ws://${host}:${port}/relay`);
 });
