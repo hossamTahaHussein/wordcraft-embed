@@ -153,3 +153,29 @@ test('a Version may be as large as a snapshot', async () => {
   assert.equal((await a.next('VersionDoc')).doc.length, 300 * 1024);
   a.ws.close();
 });
+
+/** Send a raw HTTP request line to the relay; resolves with the status line (or null on close). */
+function rawRequest(port, target) {
+  return import('node:net').then(
+    ({ default: net }) =>
+      new Promise((resolve) => {
+        const s = net.connect(port, '127.0.0.1', () => s.write(`GET ${target} HTTP/1.1\r\nHost: x\r\n\r\n`));
+        s.on('data', (d) => {
+          resolve(d.toString().split('\r\n')[0]);
+          s.destroy();
+        });
+        s.on('error', () => resolve(null));
+        s.on('close', () => resolve(null));
+      }),
+  );
+}
+
+test('a request whose URL does not parse is answered 400; the relay keeps running', async () => {
+  for (const target of ['http://[', '//[::1/api/docs/x', 'http://a:b@[/x']) {
+    assert.equal(await rawRequest(relay.port, target), 'HTTP/1.1 400 Bad Request', target);
+  }
+  const a = await connect();
+  a.send({ t: 'hello', token: token({ doc: 'doc-after-bad-url' }), client: 'cu' });
+  assert.equal((await a.next('Welcome')).rev, 0);
+  a.ws.close();
+});

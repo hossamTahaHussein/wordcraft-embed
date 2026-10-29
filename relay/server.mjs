@@ -114,9 +114,16 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
     return entry.room;
   }
 
-  /** The HTTP API. Returns false for a request that isn't under /api/ (not the relay's). */
+  /** The HTTP API. Returns false for a request that isn't under /api/ (not the relay's). A
+   * request whose URL doesn't parse is answered 400 here (true): nobody can route it. */
   function handle(req, res) {
-    const url = new URL(req.url, 'http://relay');
+    let url;
+    try {
+      url = new URL(req.url, 'http://relay');
+    } catch {
+      json(res, 400, { error: 'Bad request URL' });
+      return true;
+    }
     if (!url.pathname.startsWith('/api/')) return false;
     api(req, res, url).catch((e) => {
       if (!(e instanceof ApiError)) console.error('relay api:', e);

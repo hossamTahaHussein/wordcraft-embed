@@ -126,6 +126,8 @@ function serveFile(req, res, file, { stored = false } = {}) {
   res.writeHead(200, headers);
   if (req.method === 'HEAD') return res.end();
   const stream = createReadStream(file);
+  // The headers are out: a file that can't be read after all ends the response early.
+  stream.on('error', () => res.destroy());
   (gzip ? stream.pipe(createGzip()) : stream).pipe(res);
 }
 
@@ -182,8 +184,13 @@ function token(req, res) {
   send(res, 200, JSON.stringify({ token: t }), 'application/json');
 }
 
-const server = createServer(async (req, res) => {
-  const { pathname } = new URL(req.url, 'http://localhost');
+async function route(req, res) {
+  let pathname;
+  try {
+    ({ pathname } = new URL(req.url, 'http://localhost'));
+  } catch {
+    return send(res, 400, 'Bad request URL');
+  }
   if (pathname === '/api/token') return token(req, res);
   if (pathname.startsWith('/api/docs/') && relay.handle(req, res)) return;
   if (pathname === '/api/files' || pathname.startsWith('/api/files/')) {
@@ -193,6 +200,15 @@ const server = createServer(async (req, res) => {
   const file = staticFile(pathname);
   if (!file) return send(res, 404, 'Not found');
   serveFile(req, res, file);
+}
+
+// One bad request never takes the server down: whatever goes wrong answers 500.
+const server = createServer((req, res) => {
+  route(req, res).catch((error) => {
+    console.error('demo server:', error);
+    if (!res.headersSent) send(res, 500, 'Something went wrong');
+    else res.destroy();
+  });
 });
 const relay = await createRelay({
   secret: relaySecret,

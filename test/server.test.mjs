@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -84,4 +84,31 @@ test('demo tokens may ask for a role', async () => {
   assert.equal(claims.role, 'view');
   const { token: t2 } = await (await fetch(`${base}/api/token?doc=r&name=X&role=admin`)).json();
   assert.equal(JSON.parse(Buffer.from(t2.split('.')[1], 'base64url').toString()).role, 'edit');
+});
+
+test('a request whose URL does not parse is answered 400; the demo keeps running', async () => {
+  const net = await import('node:net');
+  for (const target of ['http://[', '//[::1/api/docs/x', 'http://a:b@[/x']) {
+    const line = await new Promise((resolve) => {
+      const s = net.connect(PORT, '127.0.0.1', () => s.write(`GET ${target} HTTP/1.1\r\nHost: x\r\n\r\n`));
+      s.on('data', (d) => {
+        resolve(d.toString().split('\r\n')[0]);
+        s.destroy();
+      });
+      s.on('error', () => resolve(null));
+      s.on('close', () => resolve(null));
+    });
+    assert.equal(line, 'HTTP/1.1 400 Bad Request', target);
+  }
+  assert.equal((await fetch(`${base}/api/token?doc=x`)).status, 200, 'still running');
+});
+
+test('an error while handling a request answers 500; the demo keeps running', async () => {
+  rmSync(filesDir, { recursive: true, force: true });
+  try {
+    assert.equal((await fetch(`${base}/api/files`)).status, 500, 'the files folder is gone');
+    assert.equal((await fetch(`${base}/api/token?doc=x`)).status, 200, 'still running');
+  } finally {
+    mkdirSync(filesDir, { recursive: true });
+  }
 });
