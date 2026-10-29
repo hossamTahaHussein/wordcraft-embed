@@ -35,7 +35,7 @@ if (version === 'latest') version = await latestVersion();
 const base = `https://github.com/${REPO}/releases/download/v${version}`;
 const zipName = `wordcraft-web-${version}.zip`;
 
-console.log(`Downloading ${zipName}…`);
+console.log(`Downloading ${zipName} from ${REPO}…`);
 const [zip, sums] = await Promise.all([download(`${base}/${zipName}`), download(`${base}/SHA256SUMS.txt`)]);
 
 const expected = sums
@@ -57,7 +57,7 @@ try {
   if (existsSync(editor)) rmSync(editor, { recursive: true });
   renameSync(join(work, `wordcraft-web-${version}`), editor);
   writeFileSync(join(editor, 'VERSION'), `${version}\n`);
-  console.log(`WordCraft ${version} unpacked into editor/`);
+  console.log(`WordCraft Collab ${version} unpacked into editor/`);
 } finally {
   rmSync(work, { recursive: true, force: true });
 }
