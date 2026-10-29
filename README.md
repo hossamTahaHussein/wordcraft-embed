@@ -151,7 +151,7 @@ a few seconds after typing stops, through the same `onSave`.
 It needs three things:
 
 1. **A co-editing build of WordCraft** in place of the official `editor/`. Build the `co-editing`
-   branch of our WordCraft fork (`cd apps/wordcraft-web && trunk build --release`) and serve
+   branch of [wordcraft-collab](https://github.com/hossamTahaHussein/wordcraft-collab) (`cd apps/wordcraft-web && trunk build --release`) and serve
    its `dist/web` as `/wordcraft/`. The official release ignores `collab`.
 2. **The relay** (`relay/server.mjs`, Node 18+, one dependency: `ws`). It never reads documents;
    it puts edits in order, keeps the session on disk (`DATA_DIR`) and chooses who autosaves.
