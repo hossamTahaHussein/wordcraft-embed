@@ -67,7 +67,7 @@ test('the first member gets no snapshot and provides revision 0', async () => {
   const { r, done } = await room();
   const a = member('a');
   r.join(a);
-  assert.deepEqual(a.got[0], { t: 'Welcome', rev: 0, snapshot: null, ops: [], you: 'a' });
+  assert.deepEqual(a.got[0], { t: 'Welcome', rev: 0, snapshot: null, ops: [], you: 'a', peers: [] });
   r.message('a', { t: 'Snapshot', rev: 0, doc: '{"v":0}' });
   assert.equal(r.rev, 0);
   await done();

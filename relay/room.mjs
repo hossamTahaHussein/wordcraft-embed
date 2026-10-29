@@ -8,6 +8,7 @@
 export const LIMITS = {
   members: 50,
   opsPerSecond: 200,
+  presencePerSecond: 15,
   snapshotEvery: 200,
   hashEvery: 50,
   idleSaveMs: 2000,
@@ -20,16 +21,24 @@ const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
 const PALETTE_SIZE = 12;
+/** The largest story part index and offset a replica can hold (u32). */
+const MAX_INDEX = 2 ** 32 - 1;
+const isIndex = (n) => isCount(n) && n <= MAX_INDEX;
 
 /** A selection as story offsets (wordcraft_collab::proto::Anchor). */
 function validSel(sel) {
   return (
     !!sel &&
     typeof sel === 'object' &&
-    (sel.story === 'body' || (sel.story && typeof sel.story === 'object' && isCount(sel.story.part))) &&
-    isCount(sel.anchor) &&
-    isCount(sel.head)
+    (sel.story === 'body' || (sel.story && typeof sel.story === 'object' && isIndex(sel.story.part))) &&
+    isIndex(sel.anchor) &&
+    isIndex(sel.head)
   );
+}
+
+/** A selection with only the fields replicas read (nothing else is forwarded). */
+function cleanSel(sel) {
+  return { story: sel.story === 'body' ? 'body' : { part: sel.story.part }, anchor: sel.anchor, head: sel.head };
 }
 
 /** Whether `msg` has the shape of an op (wordcraft_collab::proto::Op); replicas can't decode one
@@ -121,6 +130,7 @@ export class Room {
     }
     if (old) old.close(4000, 'Replaced by a newer connection');
     member.bucket = { tokens: this.limits.opsPerSecond, at: this.now() };
+    member.presenceBucket = { tokens: this.limits.presencePerSecond, at: this.now() };
     member.resyncAt = -Infinity;
     member.color = old ? old.color : this.freeColor();
     member.sel = old?.sel;
@@ -132,13 +142,18 @@ export class Room {
         this.waiting.push(member.client);
         return;
       }
-      this.bootstrapper = member.client;
-      member.send({ t: 'Welcome', rev: 0, snapshot: null, ops: [], you: member.client });
+      this.bootstrap(member);
       return;
     }
     this.welcome(member, haveRev);
     // Revisions nobody saved yet (the last person left, or the relay restarted) are saved now.
     if (this.rev > this.savedRev && !this.saveTimer) this.scheduleSave();
+  }
+
+  /** `member` opens the document (there is none yet); revision 0 is its snapshot. */
+  bootstrap(member) {
+    this.bootstrapper = member.client;
+    member.send({ t: 'Welcome', rev: 0, snapshot: null, ops: [], you: member.client, peers: this.peersOf(member.client) });
   }
 
   /** The lowest palette index no present member uses. */
@@ -197,7 +212,7 @@ export class Room {
     if (this.bootstrapper === client && !this.snapshot) {
       this.bootstrapper = null;
       const next = this.waiting.shift();
-      if (next && this.members.has(next)) this.join(this.members.get(next));
+      if (next && this.members.has(next)) this.bootstrap(this.members.get(next));
     }
     if (this.members.size === 0) {
       this.clearTimer(this.saveTimer);
@@ -208,7 +223,9 @@ export class Room {
   message(client, msg) {
     const member = this.members.get(client);
     if (!member || !msg || typeof msg.t !== 'string') return;
-    if (!this.take(member)) {
+    // Presence has its own allowance: too much is dropped, never a reason to disconnect.
+    if (msg.t === 'Presence') return this.presence(member, msg);
+    if (!this.take(member.bucket, this.limits.opsPerSecond)) {
       member.close(4429, 'Too many messages per second');
       this.leave(member.client, member);
       return;
@@ -228,14 +245,17 @@ export class Room {
         return;
       case 'ResyncRequest':
         return this.resync(member);
-      case 'Presence':
-        // Where this person is: forwarded, kept for newcomers, never logged.
-        // `rev`: the confirmed revision the selection is relative to.
-        if (!validSel(msg.sel) || (msg.rev !== undefined && !isCount(msg.rev))) return;
-        member.sel = { story: msg.sel.story, anchor: msg.sel.anchor, head: msg.sel.head };
-        member.selRev = msg.rev;
-        return this.broadcast(this.peerOf(member, 'Presence'), member.client);
     }
+  }
+
+  /** Where this person is: forwarded, kept for newcomers, never logged. `rev`: the confirmed
+   * revision the selection is relative to, one the relay has stored. */
+  presence(member, msg) {
+    if (!validSel(msg.sel) || !isCount(msg.rev) || msg.rev > this.durableRev) return;
+    if (!this.take(member.presenceBucket, this.limits.presencePerSecond)) return;
+    member.sel = cleanSel(msg.sel);
+    member.selRev = msg.rev;
+    this.broadcast(this.peerOf(member, 'Presence'), member.client);
   }
 
   op(member, msg) {
@@ -265,10 +285,10 @@ export class Room {
   }
 
   /** Token bucket for every message: `opsPerSecond`, bursting to the same number. */
-  take(member) {
-    const b = member.bucket;
+  /** One message from token bucket `b`, refilled at `perSecond`. */
+  take(b, perSecond) {
     const now = this.now();
-    b.tokens = Math.min(this.limits.opsPerSecond, b.tokens + ((now - b.at) / 1000) * this.limits.opsPerSecond);
+    b.tokens = Math.min(perSecond, b.tokens + ((now - b.at) / 1000) * perSecond);
     b.at = now;
     if (b.tokens < 1) return false;
     b.tokens -= 1;
