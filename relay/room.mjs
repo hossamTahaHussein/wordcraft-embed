@@ -2,8 +2,11 @@
 // keeps the log since the latest snapshot, tells newcomers where to start, picks who saves and
 // compares the replicas' fingerprints. Message types (`t`) match wordcraft_collab::proto.
 //
-// A member is { client, sub, user, role, send(message), close(code, reason) }: `client` is the
-// replica (one per editor tab), `sub` the user from the join token.
+// A member is { client, sub, user, role, agent?, send(message), close(code, reason) }: `client`
+// is the replica (one per editor tab), `sub` the user from the join token, `role` what they may
+// do ('edit' | 'comment' | 'view'), `agent` a program rather than a person (never the holder).
+
+import { readFileSync } from 'node:fs';
 
 export const LIMITS = {
   members: 50,
@@ -18,6 +21,12 @@ export const LIMITS = {
 };
 
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
+/** The commands a commenter may run (generated from the engine registry). */
+export const COMMENT_COMMANDS = new Set(JSON.parse(readFileSync(new URL('./comment-commands.json', import.meta.url), 'utf8')));
+const REFUSED = {
+  view: 'You can only view this document',
+  comment: 'You can only comment on this document',
+};
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
 
 const PALETTE_SIZE = 12;
@@ -58,6 +67,9 @@ function wellFormed(msg) {
   );
 }
 
+/** Whether a member may hold the lease (and so open a new document). */
+const canHold = (m) => m.role === 'edit' && !m.agent;
+
 export class Room {
   constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {} }) {
     this.id = id;
@@ -93,8 +105,10 @@ export class Room {
     return (this.snapshot?.rev ?? 0) + this.log.length;
   }
 
+  /** The autosave lease holder: the longest-connected editor that is a person. It alone saves,
+   * uploads snapshots and versions, and answers API requests. */
   get holder() {
-    for (const m of this.members.values()) if (m.role === 'edit') return m;
+    for (const m of this.members.values()) if (canHold(m)) return m;
     return null;
   }
 
@@ -138,7 +152,7 @@ export class Room {
     this.members.set(member.client, member);
     if (!old) this.broadcast({ t: 'Join', client: member.client, user: member.user, color: member.color }, member.client);
     if (!this.snapshot) {
-      if (this.bootstrapper && this.bootstrapper !== member.client) {
+      if ((this.bootstrapper && this.bootstrapper !== member.client) || !canHold(member)) {
         this.waiting.push(member.client);
         return;
       }
@@ -153,7 +167,7 @@ export class Room {
   /** `member` opens the document (there is none yet); revision 0 is its snapshot. */
   bootstrap(member) {
     this.bootstrapper = member.client;
-    member.send({ t: 'Welcome', rev: 0, snapshot: null, ops: [], you: member.client, peers: this.peersOf(member.client) });
+    member.send({ t: 'Welcome', rev: 0, snapshot: null, ops: [], you: member.client, peers: this.peersOf(member.client), role: member.role });
   }
 
   /** The lowest palette index no present member uses. */
@@ -184,9 +198,9 @@ export class Room {
   welcome(member, haveRev) {
     const base = this.snapshot?.rev ?? 0;
     if (Number.isInteger(haveRev) && haveRev >= base && haveRev <= this.durableRev) {
-      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.durableAfter(haveRev), you: member.client, peers: this.peersOf(member.client) });
+      member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.durableAfter(haveRev), you: member.client, peers: this.peersOf(member.client), role: member.role });
     } else {
-      member.send({ t: 'Welcome', ...this.fromSnapshot(member), you: member.client, peers: this.peersOf(member.client) });
+      member.send({ t: 'Welcome', ...this.fromSnapshot(member), you: member.client, peers: this.peersOf(member.client), role: member.role });
     }
   }
 
@@ -211,8 +225,11 @@ export class Room {
     if (this.snapshotFrom === client) this.snapshotFrom = null;
     if (this.bootstrapper === client && !this.snapshot) {
       this.bootstrapper = null;
-      const next = this.waiting.shift();
-      if (next && this.members.has(next)) this.bootstrap(this.members.get(next));
+      const next = this.waiting.find((c) => canHold(this.members.get(c)));
+      if (next) {
+        this.waiting = this.waiting.filter((c) => c !== next);
+        this.bootstrap(this.members.get(next));
+      }
     }
     if (this.members.size === 0) {
       this.clearTimer(this.saveTimer);
@@ -238,6 +255,7 @@ export class Room {
       case 'Hash':
         return this.vote(member, msg);
       case 'Saved':
+        if (member.role !== 'edit') return;
         if (Number.isInteger(msg.rev) && msg.rev > this.savedRev) {
           this.savedRev = Math.min(msg.rev, this.rev);
           this.store.writeMeta(this.id, { savedRev: this.savedRev });
@@ -258,11 +276,26 @@ export class Room {
     this.broadcast(this.peerOf(member, 'Presence'), member.client);
   }
 
+  /** Why `member` may not make edit `msg`, or null when it may. */
+  refusal(member, msg) {
+    if (member.role === 'view') return REFUSED.view;
+    if (member.role === 'comment') {
+      const allowed = msg.kind === 'cmd' ? COMMENT_COMMANDS.has(msg.cmd) : msg.kind === 'undo' || msg.kind === 'redo';
+      if (!allowed) return REFUSED.comment;
+    }
+    return null;
+  }
+
   op(member, msg) {
-    if (!this.snapshot || member.role !== 'edit') return;
+    if (!this.snapshot) return;
     if (!wellFormed(msg) || msg.base > this.rev) return;
     // A resent edit the relay already has (a reconnect raced its echo).
     if (msg.seq <= (this.lastSeq.get(member.client) ?? 0)) return;
+    const reason = this.refusal(member, msg);
+    if (reason) {
+      member.send({ t: 'Refused', seq: msg.seq, reason });
+      return;
+    }
     this.lastSeq.set(member.client, msg.seq);
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };

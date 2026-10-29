@@ -96,7 +96,6 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         } catch (e) {
           return close(4401, e instanceof TokenError ? `Not allowed: ${e.code}` : 'Not allowed');
         }
-        if (claims.role !== 'edit') return close(4403, 'Only editors can join for now');
         const r = await roomFor(claims.doc);
         if (ws.readyState !== ws.OPEN) return;
         room = r;

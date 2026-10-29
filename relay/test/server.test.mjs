@@ -34,7 +34,14 @@ function connect() {
       got.push(m);
       for (const w of waiters.splice(0)) w();
     });
-    const closed = new Promise((r) => ws.on('close', (code, reason) => r({ code, reason: reason.toString() })));
+    let isClosed = null;
+    const closed = new Promise((r) =>
+      ws.on('close', (code, reason) => {
+        isClosed = { code, reason: reason.toString() };
+        for (const w of waiters.splice(0)) w();
+        r(isClosed);
+      }),
+    );
     ws.on('error', reject);
     ws.on('open', () =>
       resolve({
@@ -46,6 +53,7 @@ function connect() {
           for (;;) {
             const i = got.findIndex((m) => m.t === t);
             if (i >= 0) return got.splice(i, 1)[0];
+            if (isClosed) throw new Error(`closed ${isClosed.code} ${isClosed.reason} while waiting for ${t}`);
             await new Promise((r) => waiters.push(r));
           }
         },
@@ -81,10 +89,19 @@ test('rejects bad token with 4401', async () => {
   assert.equal((await a.closed).code, 4401);
 });
 
-test('rejects a non-edit role with 4403 (roles come later)', async () => {
-  const a = await connect();
-  a.send({ t: 'hello', token: token({ role: 'view' }), client: 'c' });
-  assert.equal((await a.closed).code, 4403);
+test('admits viewers and commenters, telling them their role', async () => {
+  const e = await connect();
+  e.send({ t: 'hello', token: token({ doc: 'doc-roles' }), client: 'ce' });
+  await e.next('Welcome');
+  e.send({ t: 'Snapshot', rev: 0, doc: '{}' });
+  for (const role of ['view', 'comment']) {
+    const m = await connect();
+    m.send({ t: 'hello', token: token({ doc: 'doc-roles', sub: role, role }), client: `c${role}` });
+    const w = await m.next('Welcome');
+    assert.equal(w.role, role);
+    m.ws.close();
+  }
+  e.ws.close();
 });
 
 test('anything before hello closes the connection', async () => {
