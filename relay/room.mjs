@@ -57,6 +57,7 @@ export const COMMENT_COMMANDS = new Set(JSON.parse(readFileSync(new URL('./comme
 /** The comment commands and the `commented` webhook action each one is. */
 const COMMENT_ACTIONS = {
   'review.newComment': 'added',
+  'review.reply': 'replied',
   'review.resolveComment': 'resolved',
   'review.editComment': 'edited',
   'review.deleteComment': 'deleted',

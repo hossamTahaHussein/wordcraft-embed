@@ -5,7 +5,7 @@ import { member, op, room } from './helpers.mjs';
 
 test('comment-commands.json lists exactly the comment commands', () => {
   const list = JSON.parse(readFileSync(new URL('../comment-commands.json', import.meta.url), 'utf8'));
-  assert.deepEqual(list, ['review.newComment', 'review.editComment', 'review.deleteComment', 'review.resolveComment']);
+  assert.deepEqual(list, ['review.newComment', 'review.reply', 'review.editComment', 'review.deleteComment', 'review.resolveComment']);
 });
 
 test('Welcome carries the role from the token', async () => {

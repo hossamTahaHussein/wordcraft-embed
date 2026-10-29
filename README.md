@@ -237,7 +237,7 @@ allow is refused (the sender's editor is told why) and never reaches anyone else
 | Role | May |
 |---|---|
 | `edit` | Everything: type, format, undo their own edits, restore versions |
-| `comment` | Add, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
+| `comment` | Add, reply to, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
 | `view` | Read, and see the others' edits and cursors as they happen |
 
 Only editors save: the autosave goes to the editor who has been in the document longest. A
@@ -305,7 +305,7 @@ of JSON `{ event, doc, at, …detail }`:
 | `joined` | `{ sub, name, role }`, and `agent: true` for an agent |
 | `left` | `{ sub, name }` |
 | `edited` | `{ rev, people }`: the names of who edited. At most one every 5 seconds per document |
-| `commented` | `{ action, by, rev }`, `action` one of `added`, `resolved`, `edited`, `deleted` |
+| `commented` | `{ action, by, rev }`, `action` one of `added`, `replied`, `resolved`, `edited`, `deleted` |
 | `saved` | `{ rev }` |
 | `restored` | `{ rev, version }` |
 
