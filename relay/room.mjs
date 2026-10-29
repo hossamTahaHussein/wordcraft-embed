@@ -135,6 +135,8 @@ export class Room {
     this.versionAsk = null;
     /** Who made each revision since the newest version: [rev, name]. */
     this.editedSince = [];
+    /** Edits waiting while a restore's version loads ([member, msg]), or null. */
+    this.held = null;
   }
 
   get rev() {
@@ -350,6 +352,11 @@ export class Room {
 
   op(member, msg) {
     if (!this.snapshot) return;
+    // While a restore's version loads, later edits wait so they are sequenced after it.
+    if (this.held) {
+      this.held.push([member, msg]);
+      return;
+    }
     if (!wellFormed(msg) || msg.base > this.rev) return;
     // A resent edit the relay already has (a reconnect raced its echo).
     if (msg.seq <= (this.lastSeq.get(member.client) ?? 0)) return;
@@ -359,6 +366,32 @@ export class Room {
       return;
     }
     this.lastSeq.set(member.client, msg.seq);
+    if (msg.kind === 'restore') return this.restore(member, msg);
+    this.sequence(member, msg);
+  }
+
+  /** An editor restores a version: the op carries the version's document (`params.doc`). */
+  restore(member, msg) {
+    const version = msg.params?.version;
+    const refuse = () => member.send({ t: 'Refused', seq: msg.seq, reason: 'That version is no longer available' });
+    if (!Number.isSafeInteger(version) || !this.versions.some((v) => v.rev === version)) return refuse();
+    this.held = [];
+    this.store.readVersion(this.id, version).then((v) => {
+      if (typeof v?.doc === 'string') {
+        const op = this.sequence(member, { ...msg, params: { ...msg.params, version, doc: v.doc } });
+        op.durable.then(() => this.events('restored', { rev: op.rev, version }));
+      } else {
+        refuse();
+      }
+      const held = this.held;
+      this.held = null;
+      while (held.length && !this.held) this.op(...held.shift());
+      if (this.held) this.held.unshift(...held);
+    });
+  }
+
+  /** Give an allowed edit the next revision; broadcast it once it is on disk. */
+  sequence(member, msg) {
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
     this.log.push(op);
@@ -366,7 +399,7 @@ export class Room {
     this.editedSince.push([op.rev, op.user]);
     // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
     // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
-    this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
+    const durable = this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
       this.durableRev = Math.max(this.durableRev, op.rev);
       for (const m of this.members.values()) m.send(op);
       this.events('edited', { rev: op.rev, name: op.user });
@@ -382,6 +415,7 @@ export class Room {
         holder.send({ t: 'SnapshotRequest' });
       }
     }
+    return { rev: op.rev, durable };
   }
 
   /** Token bucket for every message: `opsPerSecond`, bursting to the same number. */
