@@ -67,7 +67,19 @@
         token: async () => (await (await fetch(`/api/token?doc=${encodeURIComponent(doc)}&name=${encodeURIComponent(name)}`)).json()).token,
       },
       // Autosave (a few seconds after typing stops) and Ctrl+S both land here.
+      // The shared document is saved on the server (autosave, Ctrl+S); anything else the editor
+      // hands over (File › Export as PDF, Save As another format) is a copy for this person:
+      // it downloads, as Download does in Google Docs.
       onSave: async ({ name: file, blob }) => {
+        if (file !== fileName) {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = file;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
+          show(`Downloaded ${file}`);
+          return;
+        }
         const res = await fetch(`/api/files/${encodeURIComponent(file)}`, { method: 'PUT', body: blob });
         if (!res.ok) throw new Error(`Saving ${file} failed`);
         show(`Saved · ${new Date().toLocaleTimeString()}`);
