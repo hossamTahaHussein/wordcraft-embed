@@ -502,6 +502,8 @@ class CollabLink {
 
   setConnected(on) {
     this.connected = on;
+    // The editor goes read only after a long time offline (and back once its edits sync).
+    this.toEditor(JSON.stringify({ t: 'Connection', online: on }));
     this.emit();
   }
 

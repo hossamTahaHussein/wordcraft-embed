@@ -129,10 +129,13 @@ test('forwards relay to iframe and back', async () => {
   assert.equal(hello.token, 'tok-1');
   assert.match(hello.client, /^[A-Za-z0-9_-]{1,64}$/);
   ws.relay({ t: 'Welcome', rev: 3, snapshot: '{}', ops: [], you: hello.client });
-  const toFrame = frame.posted.find((m) => m.type === 'wordcraft:collab');
-  assert.equal(JSON.parse(toFrame.msg).t, 'Welcome');
+  const toFrame = frame.posted.filter((m) => m.type === 'wordcraft:collab').map((m) => JSON.parse(m.msg));
+  assert.deepEqual(toFrame[0], { t: 'Connection', online: true }, 'the editor knows it is connected');
+  assert.equal(toFrame[1].t, 'Welcome');
   page.fromEditor({ type: 'wordcraft:collab', msg: JSON.stringify({ t: 'Op', seq: 1 }) });
   assert.deepEqual(ws.sent.at(-1), { t: 'Op', seq: 1 });
+  ws.drop(1006);
+  assert.deepEqual(JSON.parse(frame.posted.filter((m) => m.type === 'wordcraft:collab').at(-1).msg), { t: 'Connection', online: false });
   editor.destroy();
 });
 
