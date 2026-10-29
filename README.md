@@ -226,8 +226,11 @@ new WordCraftEditor('#editor', {
 "Saving… / All changes synced / Offline" indicator. The demo (`npm start` with
 `EDITOR_DIR` pointing at the fork's build) has a working page at `/collab.html?doc=demo`.
 
-Not yet in this version: other people's cursors and a list of who is present, and Undo while
-co-editing (it is greyed out).
+Everyone sees the others' cursors, their names and who is present. Undo and Redo work on
+each person's own edits, for everyone, however much others typed since (up to a few hundred
+edits back). After five minutes offline, or with 1,000 edits waiting to sync, the editor turns
+read only with "Reconnecting…" and offers **Save my copy** (it goes to `onSave` as
+"<name> (my copy).docx" with `saveAs: true`); editing resumes once its edits are synced.
 
 ### Roles
 
@@ -255,7 +258,8 @@ always the last save before the last editor leaves. Each version records when it
 and who edited since the one before. They are kept in `DATA_DIR/<room>/versions/`, thinned
 to at most 100: every version from the last 24 hours, then the newest of each day.
 
-Everyone in the document can list versions and preview them. Editors can restore one; the
+Everyone in the document can list versions and preview them (the status bar's **Version
+history**). Editors can restore one; the
 restore is an edit like any other, so everyone sees it at once and it can be undone.
 
 ### Server-side HTTP API
@@ -336,6 +340,19 @@ WordCraft replica. It sends the same hello as the editor with `agent: true`
 (`{ t: "hello", token, client, agent: true }`). Its token's role applies as usual. An agent never
 autosaves, never opens a new document, and is never asked for exports or API commands, so a
 document with only agents in it waits for a person.
+
+WordCraft's command line has one ready to use: an MCP server on stdio that joins the document as
+a participant, so an AI assistant (Claude, Cursor…) edits it live beside the people in it.
+
+```sh
+wordcraft-cli collab-mcp --relay wss://example.com/relay --token "$JOIN_TOKEN" --name "Assistant"
+```
+
+Issue its token like a person's (`issueToken(secret, { doc, sub, name, role })`); a `comment`
+role keeps it to comments. Its edits arrive as tracked suggestions people accept or reject
+(`--no-suggest` makes them direct edits). Beside WordCraft's usual MCP tools (run any command,
+inspect, render a page) it has `who_is_here`, `wait_for_changes` (what changed since a
+revision, waiting for it), `comment` and `reply`.
 
 ## Limits to know
 
