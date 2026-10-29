@@ -240,7 +240,7 @@ allow is refused (the sender's editor is told why) and never reaches anyone else
 | Role | May |
 |---|---|
 | `edit` | Everything: type, format, undo their own edits, restore versions |
-| `suggest` | Edit, but every change is a tracked suggestion others accept or reject; comments too. No accepting or rejecting, no switching tracking off, no restoring versions |
+| `suggest` | Type, delete, paste and format text, every change a tracked suggestion others accept or reject; comments too. Changes Track Changes can't record (tables, page layout, styles, protection) are refused, as are accepting or rejecting, switching tracking off and restoring versions. The commands allowed are listed in `relay/suggest-commands.json` |
 | `comment` | Add, reply to, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
 | `view` | Read, and see the others' edits and cursors as they happen |
 
