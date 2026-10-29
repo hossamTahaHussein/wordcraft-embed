@@ -88,3 +88,17 @@ test('leave is broadcast when a connection is closed by the rate limit', async (
   assert.deepEqual(a.last('Leave'), { t: 'Leave', client: 'b' });
   await done();
 });
+
+test('presence keeps the revision it is relative to, for others and for newcomers', async () => {
+  const { r, a, done } = await room();
+  const b = member('b');
+  r.join(b);
+  r.message('a', { t: 'Presence', sel: sel(2), rev: 7 });
+  assert.equal(b.last('Presence').rev, 7);
+  const c = member('c');
+  r.join(c);
+  assert.equal(c.last('Welcome').peers.find((p) => p.client === 'a').rev, 7);
+  r.message('a', { t: 'Presence', sel: sel(2), rev: -1 });
+  assert.equal(b.all('Presence').length, 1, 'a bad revision is refused');
+  await done();
+});

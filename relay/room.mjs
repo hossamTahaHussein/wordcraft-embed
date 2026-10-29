@@ -124,6 +124,7 @@ export class Room {
     member.resyncAt = -Infinity;
     member.color = old ? old.color : this.freeColor();
     member.sel = old?.sel;
+    member.selRev = old?.selRev;
     this.members.set(member.client, member);
     if (!old) this.broadcast({ t: 'Join', client: member.client, user: member.user, color: member.color }, member.client);
     if (!this.snapshot) {
@@ -152,11 +153,17 @@ export class Room {
     for (const m of this.members.values()) if (m.client !== except) m.send(msg);
   }
 
+  /** How a member is described to the others (`t` set for a message, left out in a list). */
+  peerOf(m, t) {
+    const peer = { client: m.client, user: m.user, color: m.color };
+    if (m.sel) peer.sel = m.sel;
+    if (m.sel && m.selRev !== undefined) peer.rev = m.selRev;
+    return t ? { t, ...peer } : peer;
+  }
+
   /** The other members as a Welcome lists them. */
   peersOf(client) {
-    return [...this.members.values()]
-      .filter((m) => m.client !== client)
-      .map((m) => (m.sel ? { client: m.client, user: m.user, color: m.color, sel: m.sel } : { client: m.client, user: m.user, color: m.color }));
+    return [...this.members.values()].filter((m) => m.client !== client).map((m) => this.peerOf(m));
   }
 
   welcome(member, haveRev) {
@@ -223,9 +230,11 @@ export class Room {
         return this.resync(member);
       case 'Presence':
         // Where this person is: forwarded, kept for newcomers, never logged.
-        if (!validSel(msg.sel)) return;
+        // `rev`: the confirmed revision the selection is relative to.
+        if (!validSel(msg.sel) || (msg.rev !== undefined && !isCount(msg.rev))) return;
         member.sel = { story: msg.sel.story, anchor: msg.sel.anchor, head: msg.sel.head };
-        return this.broadcast({ t: 'Presence', client: member.client, user: member.user, color: member.color, sel: member.sel }, member.client);
+        member.selRev = msg.rev;
+        return this.broadcast(this.peerOf(member, 'Presence'), member.client);
     }
   }
 
