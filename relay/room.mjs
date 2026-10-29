@@ -99,6 +99,9 @@ export class Room {
     /** The member asked for the next snapshot; only it may send one. */
     this.snapshotFrom = null;
     this.votes = new Map();
+    /** Who (sub) made each recent revision, for undo checks. On disk with each op and, for the
+     * last `maxHistory` revisions before it, with the snapshot. */
+    this.authors = new Map();
   }
 
   get rev() {
@@ -114,8 +117,13 @@ export class Room {
 
   async load() {
     const { snapshot, ops, meta } = await this.store.load(this.id);
+    for (const [rev, sub] of Object.entries(snapshot?.authors ?? {})) this.authors.set(Number(rev), sub);
+    if (snapshot) delete snapshot.authors;
     this.snapshot = snapshot;
-    this.log = ops;
+    this.log = ops.map(({ sub, ...o }) => {
+      if (typeof sub === 'string') this.authors.set(o.rev, sub);
+      return o;
+    });
     this.durableRev = this.rev;
     this.savedRev = Math.min(meta?.savedRev ?? 0, this.rev);
     for (const [client, seq] of Object.entries(snapshot?.seen ?? {})) this.lastSeq.set(client, seq);
@@ -283,6 +291,11 @@ export class Room {
       const allowed = msg.kind === 'cmd' ? COMMENT_COMMANDS.has(msg.cmd) : msg.kind === 'undo' || msg.kind === 'redo';
       if (!allowed) return REFUSED.comment;
     }
+    if (msg.kind === 'undo' || msg.kind === 'redo') {
+      const target = msg.params?.target;
+      if (!Number.isSafeInteger(target) || target < 1 || target > this.rev) return 'There is no such change to undo';
+      if (this.authors.get(target) !== member.sub) return 'You can only undo your own changes';
+    }
     return null;
   }
 
@@ -300,9 +313,10 @@ export class Room {
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
     this.log.push(op);
+    this.authors.set(op.rev, member.sub);
     // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
     // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
-    this.store.append(this.id, op).then(() => {
+    this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
       this.durableRev = Math.max(this.durableRev, op.rev);
       for (const m of this.members.values()) m.send(op);
     });
@@ -334,7 +348,7 @@ export class Room {
       // Revision 0, from the member who opened the document.
       if (msg.rev !== 0 || member.client !== this.bootstrapper) return;
       this.snapshot = { rev: 0, doc: msg.doc, seen: {}, history: [] };
-      this.store.writeSnapshot(this.id, this.snapshot, []);
+      this.writeSnapshot();
       for (const c of this.waiting.splice(0)) {
         const m = this.members.get(c);
         if (m) this.welcome(m);
@@ -350,7 +364,17 @@ export class Room {
     for (const o of this.log) if (o.rev <= msg.rev) seen[o.client] = o.seq;
     this.log = this.log.filter((o) => o.rev > msg.rev);
     this.snapshot = { rev: msg.rev, doc: msg.doc, seen, history };
-    this.store.writeSnapshot(this.id, this.snapshot, this.log);
+    this.writeSnapshot();
+  }
+
+  /** Store the snapshot with who made the revisions before it, and the log after it. */
+  writeSnapshot() {
+    const rev = this.snapshot.rev;
+    for (const r of this.authors.keys()) if (r <= rev - this.limits.maxHistory) this.authors.delete(r);
+    const authors = {};
+    for (const [r, sub] of this.authors) if (r <= rev) authors[r] = sub;
+    const ops = this.log.map((o) => ({ ...o, sub: this.authors.get(o.rev) }));
+    this.store.writeSnapshot(this.id, { ...this.snapshot, authors }, ops);
   }
 
   resync(member) {
