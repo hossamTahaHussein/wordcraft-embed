@@ -6,6 +6,7 @@
 // is the replica (one per editor tab), `sub` the user from the join token, `role` what they may
 // do ('edit' | 'comment' | 'view'), `agent` a program rather than a person (never the holder).
 
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 export const LIMITS = {
@@ -23,6 +24,19 @@ export const LIMITS = {
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** How long joins are refused after the document was closed (the HTTP API's close). */
+const CLOSED_FOR_MS = 10_000;
+
+/** An HTTP API request the room can't answer: `status` is the HTTP status. */
+export class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
+}
+
+/** The replica's answer to each API request type. */
+const ANSWERS = { Export: 'Exported', Run: 'RunResult' };
 
 /** Which versions to keep (`list` oldest first): all from the last 24 hours, then the newest of
  * each calendar day (UTC), at most `max` of them, the newest. */
@@ -137,6 +151,11 @@ export class Room {
     this.editedSince = [];
     /** Edits waiting while a restore's version loads ([member, msg]), or null. */
     this.held = null;
+    /** When the last save landed (ISO), or null. */
+    this.lastSaved = null;
+    /** API requests waiting for the holder's answer, by id. */
+    this.asks = new Map();
+    this.closedUntil = -Infinity;
   }
 
   get rev() {
@@ -161,6 +180,7 @@ export class Room {
     });
     this.durableRev = this.rev;
     this.savedRev = Math.min(meta?.savedRev ?? 0, this.rev);
+    this.lastSaved = meta?.lastSaved ?? null;
     for (const [client, seq] of Object.entries(snapshot?.seen ?? {})) this.lastSeq.set(client, seq);
     for (const o of ops) this.lastSeq.set(o.client, o.seq);
     this.versions = await this.store.loadVersions(this.id);
@@ -179,6 +199,10 @@ export class Room {
 
   /** A member arrives. `haveRev`: the revision a reconnecting replica already has. */
   join(member, haveRev) {
+    if (this.now() < this.closedUntil) {
+      member.close(4410, 'This document was closed');
+      return;
+    }
     const old = this.members.get(member.client);
     if (old && old.sub !== member.sub) {
       member.close(4400, 'That client id belongs to someone else');
@@ -282,6 +306,9 @@ export class Room {
         this.bootstrap(this.members.get(next));
       }
     }
+    for (const [id, ask] of this.asks) {
+      if (ask.client === client) this.settle(id, new ApiError(504, 'The editor left before answering'));
+    }
     if (this.members.size === 0) {
       this.clearTimer(this.saveTimer);
       this.saveTimer = null;
@@ -309,7 +336,8 @@ export class Room {
         if (member.role !== 'edit') return;
         if (Number.isInteger(msg.rev) && msg.rev > this.savedRev) {
           this.savedRev = Math.min(msg.rev, this.rev);
-          this.store.writeMeta(this.id, { savedRev: this.savedRev });
+          this.lastSaved = new Date(this.now()).toISOString();
+          this.store.writeMeta(this.id, { savedRev: this.savedRev, lastSaved: this.lastSaved });
           this.events('saved', { rev: this.savedRev });
           if (member === this.holder) this.askVersion(member, this.savedRev);
         }
@@ -320,6 +348,9 @@ export class Room {
         return member.send({ t: 'VersionList', versions: [...this.versions].reverse().map(({ rev, at, users }) => ({ rev, at, users })) });
       case 'GetVersion':
         return this.sendVersion(member, msg.rev);
+      case 'Exported':
+      case 'RunResult':
+        return this.answer(member, msg);
       case 'ResyncRequest':
         return this.resync(member);
     }
@@ -462,6 +493,59 @@ export class Room {
     for (const [r, sub] of this.authors) if (r <= rev) authors[r] = sub;
     const ops = this.log.map((o) => ({ ...o, sub: this.authors.get(o.rev) }));
     this.store.writeSnapshot(this.id, { ...this.snapshot, authors }, ops);
+  }
+
+  /** Everyone here, as the HTTP API lists them. */
+  people() {
+    return [...this.members.values()].map((m) => ({ client: m.client, sub: m.sub, name: m.user, role: m.role, color: m.color }));
+  }
+
+  /** Ask the lease holder's replica `msg` (Export or Run) for the HTTP API; resolves with its
+   * answer. No holder: 409. No answer in `timeoutMs`: 504 (no other editor is tried). */
+  ask(msg, timeoutMs) {
+    const holder = this.holder;
+    if (!holder) return Promise.reject(new ApiError(409, 'No editor has this document open'));
+    const id = randomUUID();
+    return new Promise((resolve, reject) => {
+      const timer = this.setTimer(() => this.settle(id, new ApiError(504, 'The editor did not answer in time')), timeoutMs);
+      this.asks.set(id, { client: holder.client, answer: ANSWERS[msg.t], resolve, reject, timer });
+      holder.send({ ...msg, id });
+    });
+  }
+
+  answer(member, msg) {
+    const ask = this.asks.get(msg.id);
+    if (ask && ask.client === member.client && ask.answer === msg.t) this.settle(msg.id, null, msg);
+  }
+
+  settle(id, error, value) {
+    const ask = this.asks.get(id);
+    if (!ask) return;
+    this.asks.delete(id);
+    this.clearTimer(ask.timer);
+    if (error) ask.reject(error);
+    else ask.resolve(value);
+  }
+
+  /** Close the connections of everyone `which` picks with `code`; how many. */
+  closeWhere(which, code, reason) {
+    const gone = [...this.members.values()].filter(which);
+    for (const m of gone) {
+      m.close(code, reason);
+      this.leave(m.client, m);
+    }
+    return gone.length;
+  }
+
+  /** Remove a user (every connection of theirs). */
+  kick(sub) {
+    return this.closeWhere((m) => m.sub === sub, 4403, 'Removed from this document');
+  }
+
+  /** Close the document for everyone, refusing joins for 10 s. */
+  closeAll() {
+    this.closedUntil = this.now() + CLOSED_FOR_MS;
+    return this.closeWhere(() => true, 4410, 'This document was closed');
   }
 
   /** A save at `rev` landed: keep it as a version when there is none yet, the newest is 10
