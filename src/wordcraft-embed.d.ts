@@ -38,7 +38,10 @@ export interface WordCraftEditorOptions {
   /** Store the file. A rejected promise is reported as an `error` event. */
   onSave?: (file: SavedFile) => void | Promise<unknown>;
   onDirtyChange?: (dirty: boolean) => void;
-  onError?: (error: Error) => void;
+  /** Something failed. When co-editing, an error with `code` 4403 (removed from the document)
+   * or 4410 (the document was closed) has a message to show the person; the editor doesn't
+   * reconnect after those (or after 4400, 4401, 4409). */
+  onError?: (error: WordCraftError) => void;
   /**
    * Co-edit through a relay (`relay/server.mjs`). Only the first person's `document` is opened;
    * everyone who joins later gets the shared copy. Saves (autosave every few seconds, Ctrl+S)
@@ -50,6 +53,11 @@ export interface WordCraftEditorOptions {
     /** A join token from your backend; a function is called again for every reconnect. */
     token: string | (() => string | Promise<string>);
   };
+}
+
+export interface WordCraftError extends Error {
+  /** The relay's close code, for errors that ended co-editing. */
+  code?: number;
 }
 
 export interface CollabStatus {
@@ -96,7 +104,7 @@ export interface WordCraftEventMap {
   ready: CustomEvent<{ version: string | null }>;
   save: CustomEvent<SavedFile>;
   dirty: CustomEvent<{ dirty: boolean }>;
-  error: CustomEvent<{ error: Error }>;
+  error: CustomEvent<{ error: WordCraftError }>;
   collab: CustomEvent<CollabStatus>;
   change: CustomEvent<ChangeDetail>;
   selectionchange: CustomEvent<SelectionDetail>;

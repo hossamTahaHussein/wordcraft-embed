@@ -39,8 +39,13 @@ const DEFAULT_CALL_TIMEOUT_MS = 30_000;
 const PERMANENT_CLOSE = {
   4400: 'the editor sent a bad client id',
   4401: 'not allowed to edit this document (the join token was refused)',
-  4403: 'not allowed to edit this document (role)',
   4409: 'this document has too many people in it',
+};
+
+/** Close codes whose message is meant for the person: removed (with the relay's reason) or closed. */
+const PERSON_CLOSE = {
+  4403: (reason) => reason || 'Not allowed in this document',
+  4410: () => 'This document was closed',
 };
 
 const DEFAULT_READY_TIMEOUT_MS = 60_000;
@@ -447,8 +452,11 @@ class CollabLink {
       this.ws = null;
       this.setConnected(false);
       const permanent = PERMANENT_CLOSE[event.code];
-      if (permanent) {
-        this.editor._emit('error', { error: new Error(`WordCraft: ${permanent}`) });
+      const forPerson = PERSON_CLOSE[event.code];
+      if (permanent || forPerson) {
+        const error = new Error(forPerson ? forPerson(event.reason) : `WordCraft: ${permanent}`);
+        error.code = event.code;
+        this.editor._emit('error', { error });
         return;
       }
       this.reconnectLater();

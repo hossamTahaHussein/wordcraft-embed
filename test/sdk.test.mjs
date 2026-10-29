@@ -77,9 +77,9 @@ function fakeSockets() {
     relay(msg) {
       this.onmessage?.({ data: JSON.stringify(msg) });
     }
-    drop(code = 1006) {
+    drop(code = 1006, reason = '') {
       this.readyState = 3;
-      this.onclose?.({ code, reason: '' });
+      this.onclose?.({ code, reason });
     }
   }
   FakeWS.OPEN = 1;
@@ -193,6 +193,24 @@ test('a refused token stops reconnecting and reports an error', async () => {
   assert.match(errors.join(), /not allowed/i);
   editor.destroy();
 });
+
+for (const [code, reason, message] of [
+  [4403, 'Removed from this document', 'Removed from this document'],
+  [4403, '', 'Not allowed in this document'],
+  [4410, 'This document was closed', 'This document was closed'],
+  [4410, '', 'This document was closed'],
+]) {
+  test(`close ${code} "${reason}" reports "${message}" and does not reconnect`, async () => {
+    const errors = [];
+    const { made, editor } = await setup({}, { onError: (e) => errors.push(e) });
+    made[0].open();
+    made[0].drop(code, reason);
+    await tick(50);
+    assert.equal(made.length, 1);
+    assert.deepEqual(errors.map((e) => [e.message, e.code]), [[message, code]]);
+    editor.destroy();
+  });
+}
 
 test('collab status events carry connection and pending edits', async () => {
   const seen = [];
