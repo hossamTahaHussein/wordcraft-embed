@@ -5,7 +5,8 @@
 // Standalone:   RELAY_SECRET=… DATA_DIR=./relay-data PORT=8090 node relay/server.mjs
 // In a server:  const relay = await createRelay({ secret, dataDir, server: httpServer });
 //
-// The first message on a connection must be { t: "hello", token, client, haveRev? }.
+// The first message on a connection must be { t: "hello", token, client, haveRev?, agent? }
+// (`agent: true` for a program such as an MCP agent: never the autosave lease holder).
 
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -100,6 +101,7 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         if (ws.readyState !== ws.OPEN) return;
         room = r;
         me = { client, sub: claims.sub, user: claims.name, role: claims.role, send, close };
+        if (msg.agent === true) me.agent = true;
         room.join(me, Number.isInteger(msg.haveRev) ? msg.haveRev : undefined);
         return;
       }

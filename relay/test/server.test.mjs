@@ -124,3 +124,17 @@ test('a bad client id is refused', async () => {
   a.send({ t: 'hello', token: token(), client: 'x'.repeat(500) });
   assert.equal((await a.closed).code, 4400);
 });
+
+test('hello with agent: true joins as an agent, which never opens the document', async () => {
+  const bot = await connect();
+  bot.send({ t: 'hello', token: token({ doc: 'doc-agent', sub: 'bot', name: 'Bot' }), client: 'cbot', agent: true });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(bot.got, [], 'the agent waits for a person to open the document');
+  const p = await connect();
+  p.send({ t: 'hello', token: token({ doc: 'doc-agent' }), client: 'cp' });
+  assert.equal((await p.next('Welcome')).snapshot, null);
+  p.send({ t: 'Snapshot', rev: 0, doc: '{}' });
+  assert.equal((await bot.next('Welcome')).snapshot, '{}');
+  bot.ws.close();
+  p.ws.close();
+});
