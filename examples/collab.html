@@ -42,8 +42,9 @@
     document.querySelector('#another').href = `?doc=${encodeURIComponent(doc)}&name=${encodeURIComponent(other)}`;
 
     const status = document.querySelector('#status');
+    let people = 1;
     const show = (text, kind = '') => {
-      status.textContent = text;
+      status.textContent = people > 1 ? `${text} · ${people} people` : text;
       status.className = kind;
     };
 
@@ -74,11 +75,9 @@
       onError: (error) => show(error.message, 'error'),
     });
     editor.addEventListener('collab', ({ detail }) => {
+      people = detail.connected ? detail.people : 1;
       if (!detail.connected) show(detail.pending ? `Offline — ${detail.pending} edits will sync` : 'Reconnecting…', 'off');
-      else {
-        const others = detail.people > 1 ? ` · ${detail.people} people` : '';
-        show((detail.pending ? 'Saving…' : 'All changes synced') + others);
-      }
+      else show(detail.pending ? 'Saving…' : 'All changes synced');
     });
 
   </script>
