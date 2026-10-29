@@ -381,3 +381,28 @@ test('events_are_dispatched', async () => {
   page.fromOtherOrigin({ type: 'wordcraft:event', event: 'change', detail: { rev: 9 } }, frame);
   assert.equal(heard.length, before);
 });
+
+test('calls wait for the starting document to open', async () => {
+  const { editor, ready, frame, calls } = plain({ document: new Uint8Array([1, 2, 3]), documentName: 'start.docx' });
+  const text = editor.getText();
+  ready();
+  await tick(20);
+  const types = frame.posted.map((m) => m.type);
+  assert.ok(types.indexOf('wordcraft:open') !== -1, 'the document is sent');
+  assert.ok(types.indexOf('wordcraft:open') < types.indexOf('wordcraft:call'), `the call goes after the document: ${types}`);
+  editor.destroy();
+  await assert.rejects(text, /destroyed/);
+  void calls;
+});
+
+test('co-editing calls wait until the shared document is joined', async () => {
+  const { page, editor, frame } = await setup();
+  const text = editor.getText();
+  await tick(20);
+  assert.equal(frame.posted.filter((m) => m.type === 'wordcraft:call').length, 0, 'not before the document is joined');
+  page.fromEditor({ type: 'wordcraft:collab.status', pending: 0, rev: 0, people: 1 });
+  await tick(20);
+  assert.equal(frame.posted.filter((m) => m.type === 'wordcraft:call').length, 1);
+  editor.destroy();
+  await assert.rejects(text, /destroyed/);
+});

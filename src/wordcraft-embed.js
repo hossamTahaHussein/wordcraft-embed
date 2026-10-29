@@ -223,12 +223,19 @@ export class WordCraftEditor extends EventTarget {
 
     host.appendChild(this.iframe);
 
+    // API calls wait for the document they act on: the starting one opened, or, co-editing,
+    // the shared one joined (its first status with a revision).
+    this._opened = this.ready;
     if (this.options.collab) {
       this._collab = new CollabLink(this, this.options.collab);
       this.ready.then(() => this._collab?.connect(), () => {});
+      this._opened = new Promise((resolve) => (this._joined = resolve));
     } else if (this.options.document != null) {
-      this.open(this.options.document, this.options.documentName).catch((error) => this._emit('error', { error }));
+      const opening = this.open(this.options.document, this.options.documentName);
+      opening.catch((error) => this._emit('error', { error }));
+      this._opened = opening.then(() => this.ready);
     }
+    this._opened.catch(() => {});
   }
 
   /**
@@ -288,6 +295,7 @@ export class WordCraftEditor extends EventTarget {
 
   /** Send API call `method` once the editor is ready; resolves with its result. */
   async _call(method, params = {}) {
+    await this._opened;
     await this.ready;
     if (this.destroyed) throw new Error('WordCraft: the editor was destroyed');
     const id = this._nextCall++;
@@ -315,6 +323,7 @@ export class WordCraftEditor extends EventTarget {
     window.removeEventListener('beforeunload', this._onBeforeUnload);
     this._collab?.stop();
     this._collab = null;
+    this._joined?.();
     for (const { reject, timer } of this._calls.values()) {
       clearTimeout(timer);
       reject(new Error('WordCraft: the editor was destroyed'));
@@ -352,6 +361,7 @@ export class WordCraftEditor extends EventTarget {
         break;
       case MESSAGE.collabStatus:
         this._collab?.status(data);
+        if (data.rev != null) this._joined?.();
         break;
       case MESSAGE.result: {
         const call = this._calls.get(data.id);
