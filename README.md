@@ -189,7 +189,8 @@ It needs three things:
    branch of [wordcraft-collab](https://github.com/hossamTahaHussein/wordcraft-collab) (`cd apps/wordcraft-web && trunk build --release`) and serve
    its `dist/web` as `/wordcraft/`. The official release ignores `collab`.
 2. **The relay** (`relay/server.mjs`, Node 18+, one dependency: `ws`). It never reads documents;
-   it puts edits in order, keeps the session on disk (`DATA_DIR`) and chooses who autosaves.
+   it puts edits in order, keeps the session and its versions on disk (`DATA_DIR`) and chooses
+   who autosaves.
    Run it on its own (`RELAY_SECRET=… DATA_DIR=./relay-data node relay/server.mjs`, then proxy
    `wss://yoursite/relay` to it) or inside your Node server (`createRelay({ secret, dataDir, server })`).
 3. **Join tokens from your backend.** Only your site knows who is signed in, so it issues a short
@@ -225,8 +226,116 @@ new WordCraftEditor('#editor', {
 "Saving… / All changes synced / Offline" indicator. The demo (`npm start` with
 `EDITOR_DIR` pointing at the fork's build) has a working page at `/collab.html?doc=demo`.
 
-Not yet in this version: other people's cursors and a list of who is present, Undo while
-co-editing (it is greyed out), roles other than editor, and version history.
+Not yet in this version: other people's cursors and a list of who is present, and Undo while
+co-editing (it is greyed out).
+
+### Roles
+
+The token's `role` says what the person may do. The relay enforces it: an edit a role doesn't
+allow is refused (the sender's editor is told why) and never reaches anyone else.
+
+| Role | May |
+|---|---|
+| `edit` | Everything: type, format, undo their own edits, restore versions |
+| `comment` | Add, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
+| `view` | Read, and see the others' edits and cursors as they happen |
+
+Only editors save: the autosave goes to the editor who has been in the document longest. A
+document is opened (from `document`) by the first editor; a viewer or commenter who arrives
+first waits for one.
+
+When the relay removes someone or the document is closed (see the HTTP API below), the
+editor stops reconnecting and fires `error` with a message to show the person:
+`error.code` is 4403 ("Removed from this document") or 4410 ("This document was closed").
+
+### Version history
+
+Saves become versions: the first save of a session, then at most one every 10 minutes, and
+always the last save before the last editor leaves. Each version records when it was saved
+and who edited since the one before. They are kept in `DATA_DIR/<room>/versions/`, thinned
+to at most 100: every version from the last 24 hours, then the newest of each day.
+
+Everyone in the document can list versions and preview them. Editors can restore one; the
+restore is an edit like any other, so everyone sees it at once and it can be undone.
+
+### Server-side HTTP API
+
+Your backend can ask the relay about a document, get its content and change it, with no
+browser involved. Set `RELAY_API_KEY` (standalone) or pass `apiKey` to `createRelay`; without a
+key the API is off and every `/api/` route answers 404. Send the key as a bearer token.
+Responses are JSON, errors `{ "error": "…" }`.
+
+| Route | Answers |
+|---|---|
+| `GET /api/docs/:doc` | `{ doc, rev, savedRev, lastSaved, people: [{ client, sub, name, role, color }] }` |
+| `GET /api/docs/:doc/content?format=docx` | The document now, as `docx`, `pdf`, `odt`, `rtf`, `html`, `md` or `txt`, as a download |
+| `GET /api/docs/:doc/text` | The document's text (`text/plain`) |
+| `POST /api/docs/:doc/commands` | Body `{ command, params?, author? }`: run a WordCraft command as an edit by `author` (default `API`). Answers `{ ok: true, result }`, or `{ ok: false, error }` with 422 |
+| `POST /api/docs/:doc/kick` | Body `{ sub }`: remove that user from the document. `{ kicked }` is how many connections closed |
+| `POST /api/docs/:doc/close` | Close the document for everyone and refuse joins for 10 seconds. `{ closed }` |
+
+Content and commands are produced by the editor of someone who has the document open, so
+they answer 409 when no editor is connected and 504 when that editor doesn't answer within
+15 seconds. A document nobody ever opened is 404.
+
+```sh
+KEY=…   # RELAY_API_KEY
+curl -H "Authorization: Bearer $KEY" https://yoursite.com/api/docs/report-42
+curl -H "Authorization: Bearer $KEY" https://yoursite.com/api/docs/report-42/text
+curl -H "Authorization: Bearer $KEY" -o report.pdf 'https://yoursite.com/api/docs/report-42/content?format=pdf'
+curl -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+     -d '{"command":"insert.table","params":{"rows":2,"cols":3},"author":"Workflow"}' \
+     https://yoursite.com/api/docs/report-42/commands
+curl -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -d '{"sub":"user-17"}' \
+     https://yoursite.com/api/docs/report-42/kick
+```
+
+Standalone, the relay answers these on its own port. Inside your Node server, hand it the
+requests: `if (relay.handle(req, res)) return;` (it returns `false` for anything not under
+`/api/`). The demo server does this, so `RELAY_API_KEY=… npm start` turns the API on there.
+
+### Webhooks
+
+The relay can tell your server what happens in documents. Set `WEBHOOK_URL` and
+`WEBHOOK_SECRET` (or pass `webhook: { url, secret }` to `createRelay`). Each event is a POST
+of JSON `{ event, doc, at, …detail }`:
+
+| Event | Detail |
+|---|---|
+| `joined` | `{ sub, name, role }`, and `agent: true` for an agent |
+| `left` | `{ sub, name }` |
+| `edited` | `{ rev, people }`: the names of who edited. At most one every 5 seconds per document |
+| `commented` | `{ action, by, rev }`, `action` one of `added`, `resolved`, `edited`, `deleted` |
+| `saved` | `{ rev }` |
+| `restored` | `{ rev, version }` |
+
+Deliveries time out after 5 seconds and are tried up to three times. Each document's events
+arrive in order. They are signed: `X-WordCraft-Signature` is an HMAC-SHA256 of
+`<X-WordCraft-Timestamp>.<body>` with your secret. Check it before trusting a delivery, on the
+raw body:
+
+```js
+import express from 'express';
+import { verifyWebhook } from 'wordcraft-embed/relay/webhook.mjs';
+
+app.post('/hooks/wordcraft', express.raw({ type: 'application/json' }), (req, res) => {
+  if (!verifyWebhook(process.env.WEBHOOK_SECRET, req.headers, req.body)) return res.sendStatus(401);
+  const event = JSON.parse(req.body);
+  if (event.event === 'saved') console.log(`${event.doc} saved at revision ${event.rev}`);
+  res.sendStatus(204);
+});
+```
+
+`verifyWebhook(secret, headers, body, toleranceS = 300)` also refuses a delivery whose
+timestamp is more than five minutes away, so an old one can't be replayed.
+
+### Agents
+
+A program can join a document like a person, for example an AI agent running a headless
+WordCraft replica. It sends the same hello as the editor with `agent: true`
+(`{ t: "hello", token, client, agent: true }`). Its token's role applies as usual. An agent never
+autosaves, never opens a new document, and is never asked for exports or API commands, so a
+document with only agents in it waits for a person.
 
 ## Limits to know
 
