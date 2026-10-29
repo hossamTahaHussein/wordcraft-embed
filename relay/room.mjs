@@ -136,6 +136,8 @@ export class Room {
     this.members = new Map();
     /** Members waiting for revision 0 while the first one opens the document. */
     this.waiting = [];
+    /** Replicas waiting for a fresh snapshot (`ResyncRequest` with `fresh`). */
+    this.freshWaiting = new Set();
     this.bootstrapper = null;
     this.savedRev = 0;
     this.dirtySince = null;
@@ -301,7 +303,10 @@ export class Room {
     this.broadcast({ t: 'Leave', client });
     this.events('left', { sub: gone.sub, name: gone.user });
     this.waiting = this.waiting.filter((c) => c !== client);
-    if (this.snapshotFrom === client) this.snapshotFrom = null;
+    if (this.snapshotFrom === client) {
+      this.snapshotFrom = null;
+      this.answerFresh();
+    }
     if (this.bootstrapper === client && !this.snapshot) {
       this.bootstrapper = null;
       const next = this.waiting.find((c) => canHold(this.members.get(c)));
@@ -356,7 +361,7 @@ export class Room {
       case 'RunResult':
         return this.answer(member, msg);
       case 'ResyncRequest':
-        return this.resync(member);
+        return msg.fresh === true ? this.freshResync(member) : this.resync(member);
     }
   }
 
@@ -422,6 +427,13 @@ export class Room {
     const version = msg.params?.version;
     const refuse = () => member.send({ t: 'Refused', seq: msg.seq, reason: 'That version is no longer available' });
     if (!Number.isSafeInteger(version) || !this.versions.some((v) => v.rev === version)) return refuse();
+    // The document it replaces is kept as a version first (the holder's copy, asked before the
+    // restore reaches it).
+    const holder = this.holder;
+    if (holder && this.durableRev > (this.versions.at(-1)?.rev ?? 0)) {
+      this.versionAsk = { rev: this.durableRev, client: holder.client };
+      holder.send({ t: 'VersionRequest', rev: this.durableRev });
+    }
     this.held = [];
     this.store.readVersion(this.id, version).then((v) => {
       if (typeof v?.doc === 'string') {
@@ -492,13 +504,26 @@ export class Room {
     // Only the member asked, once, and only a revision it can have.
     if (member.client !== this.snapshotFrom) return;
     this.snapshotFrom = null;
-    if (msg.rev <= this.snapshot.rev || msg.rev > this.durableRev) return;
+    if (msg.rev <= this.snapshot.rev || msg.rev > this.durableRev) return this.answerFresh();
     const history = Array.isArray(msg.history) ? msg.history.slice(-this.limits.maxHistory) : [];
     const seen = { ...this.snapshot.seen };
     for (const o of this.log) if (o.rev <= msg.rev) seen[o.client] = o.seq;
     this.log = this.log.filter((o) => o.rev > msg.rev);
     this.snapshot = { rev: msg.rev, doc: msg.doc, seen, history };
     this.writeSnapshot();
+    this.answerFresh();
+  }
+
+  /** Resync the replicas waiting for a fresh snapshot from the one there is now. */
+  answerFresh() {
+    for (const c of this.freshWaiting) {
+      const m = this.members.get(c);
+      if (m && this.snapshot) {
+        m.resyncAt = this.now();
+        m.send({ t: 'Resync', ...this.fromSnapshot(m) });
+      }
+    }
+    this.freshWaiting.clear();
   }
 
   /** Store the snapshot with who made the revisions before it, and the log after it. */
@@ -596,6 +621,19 @@ export class Room {
       const v = known ? await this.store.readVersion(this.id, rev) : null;
       member.send({ t: 'VersionDoc', rev, doc: typeof v?.doc === 'string' ? v.doc : null });
     });
+  }
+
+  /** A replica that can't apply an edit from what the stored snapshot holds (an undo of an
+   * edit from before it joined): the lease holder uploads a snapshot now, then it starts again
+   * from that. Without another editor to ask, the stored snapshot. */
+  freshResync(member) {
+    const holder = this.holder;
+    if (!holder || holder.client === member.client) return this.resync(member);
+    this.freshWaiting.add(member.client);
+    if (this.snapshotFrom) return;
+    this.snapshotAskedAt = this.rev;
+    this.snapshotFrom = holder.client;
+    holder.send({ t: 'SnapshotRequest' });
   }
 
   resync(member) {

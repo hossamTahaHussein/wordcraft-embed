@@ -261,7 +261,8 @@ to at most 100: every version from the last 24 hours, then the newest of each da
 
 Everyone in the document can list versions and preview them (the status bar's **Version
 history**). Editors can restore one; the
-restore is an edit like any other, so everyone sees it at once and it can be undone.
+restore is an edit like any other, so everyone sees it at once and it can be undone. The
+document it replaces is kept as a version first.
 
 ### Server-side HTTP API
 

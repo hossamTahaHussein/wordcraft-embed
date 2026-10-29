@@ -99,3 +99,18 @@ test('the restorer may undo the restore', async () => {
   assert.equal(a.last('Op').kind, 'undo');
   await done();
 });
+
+test('the document a restore replaces is kept as a version first', async () => {
+  const { r, a, done } = await withVersion();
+  r.message('a', op('a', 2));
+  await r.flush();
+  r.message('a', restore('a', 3, 1));
+  const ask = a.last('VersionRequest');
+  assert.equal(ask.rev, 2, 'asked for the document as it is before the restore');
+  r.message('a', { t: 'Version', rev: 2, doc: '{"v":2}' });
+  await until(() => a.last('Op')?.kind === 'restore');
+  await tick(10);
+  r.message('a', { t: 'Versions' });
+  assert.deepEqual(a.last('VersionList').versions.map((v) => v.rev), [2, 1]);
+  await done();
+});

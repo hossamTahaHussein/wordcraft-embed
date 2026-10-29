@@ -110,3 +110,20 @@ test('an undo of a run of typing names every edit in it, all of them the sender\
   assert.equal(b.last('Refused').reason, 'You can only undo your own changes');
   await done();
 });
+
+test('a fresh resync asks the holder for a snapshot and resyncs from it', async () => {
+  const { r, a, done } = await room();
+  const late = member('late');
+  r.join(late);
+  r.message('a', op('a', 1));
+  r.message('late', { t: 'ResyncRequest', have: 1, fresh: true });
+  await r.flush();
+  assert.equal(a.last('SnapshotRequest').t, 'SnapshotRequest', 'the holder is asked');
+  assert.equal(late.all('Resync').length, 0, 'it waits for the fresh one');
+  r.message('a', { t: 'Snapshot', rev: 1, doc: '{"v":1}', history: [] });
+  await r.flush();
+  const resync = late.last('Resync');
+  assert.equal(resync.rev, 1);
+  assert.equal(resync.snapshot, '{"v":1}');
+  await done();
+});
