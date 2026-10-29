@@ -156,3 +156,19 @@ test('the relay restarts mid-typing: nothing is lost or doubled', async () => {
   }
   for (const { page, name } of pages) await page.screenshot({ path: join(process.env.SHOTS_DIR || tmpdir(), `collab-${name}.png`) });
 });
+
+test('people see each other: a count, coloured carets, and someone leaving', async () => {
+  const statuses = () => Promise.all(pages.map(({ page }) => page.textContent('#status')));
+  try {
+    await waitFor(async () => (await statuses()).every((t) => t.includes('3 people')), 'everyone to see three people', 20_000);
+  } catch (e) {
+    console.log('statuses:', await statuses());
+    throw e;
+  }
+  await pages[0].page.keyboard.type(' (Ann is here)', { delay: 30 });
+  await sleep(1000);
+  await pages[1].page.screenshot({ path: join(process.env.SHOTS_DIR || tmpdir(), 'presence-Bob.png') });
+  const chen = pages.pop();
+  await chen.context.close();
+  await waitFor(async () => (await statuses()).every((t) => t.includes('2 people')), 'Chen to leave', 35_000);
+});
