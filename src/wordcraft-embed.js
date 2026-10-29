@@ -90,7 +90,7 @@ async function toDocument(source, name) {
 }
 
 /** The editor page's URL with the host-mode query flags. */
-function editorUrl(src, { author, webgl, collab, docName }) {
+function editorUrl(src, { author, webgl, collab, docName, language }) {
   const url = new URL(src, location.href);
   if (url.origin !== location.origin) {
     throw new Error(
@@ -101,6 +101,7 @@ function editorUrl(src, { author, webgl, collab, docName }) {
   url.searchParams.set('host', 'parent');
   if (author) url.searchParams.set('author', author);
   if (webgl) url.searchParams.set('webgl', '');
+  if (language) url.searchParams.set('lang', language);
   if (collab) {
     url.searchParams.set('collab', '1');
     if (docName) url.searchParams.set('docName', docName);
@@ -127,6 +128,7 @@ export class WordCraftEditor extends EventTarget {
    * @param {string} [options.documentName] name for `document` when it has none (sets the format)
    * @param {string} [options.author] user name for comments and tracked changes
    * @param {boolean} [options.webgl] force WebGL2 instead of WebGPU
+   * @param {string} [options.language] interface language, e.g. 'ar', 'fr' (default: the browser's)
    * @param {boolean} [options.guardUnload=true] warn before leaving the page with unsaved changes
    * @param {number} [options.readyTimeout=60000] ms to wait for the editor before an `error`
    * @param {string} [options.title='Document editor'] accessible title of the iframe

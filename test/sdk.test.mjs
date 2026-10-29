@@ -240,3 +240,9 @@ test('collab status carries how many people are in the document', async () => {
   assert.equal(seen.at(-1).people, 4);
   editor.destroy();
 });
+
+test('a language option sets the interface language', async () => {
+  const { frame, editor } = await setup({}, { language: 'ar' });
+  assert.equal(new URL(frame.src).searchParams.get('lang'), 'ar');
+  editor.destroy();
+});

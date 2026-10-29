@@ -24,6 +24,8 @@ export interface WordCraftEditorOptions {
   author?: string;
   /** Force WebGL2 instead of WebGPU. */
   webgl?: boolean;
+  /** Interface language, e.g. "ar", "fr", "ja" (default: the browser's). Right-to-left languages mirror the window. */
+  language?: string;
   /** Warn before leaving the page with unsaved changes. Default true. */
   guardUnload?: boolean;
   /** Milliseconds to wait for the editor to start before an `error`. Default 60000. */
