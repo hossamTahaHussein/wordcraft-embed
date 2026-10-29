@@ -81,7 +81,7 @@ test('a member joining before revision 0 exists waits for it', async () => {
   r.join(b);
   assert.equal(b.got.length, 0, 'b must not be told to provide the document too');
   r.message('a', { t: 'Snapshot', rev: 0, doc: '{"v":0}' });
-  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 0, snapshot: '{"v":0}', ops: [], you: 'b' });
+  assert.deepEqual(b.got[0], { t: 'Welcome', rev: 0, snapshot: '{"v":0}', ops: [], you: 'b', seen: 0 });
   await done();
 });
 
@@ -303,4 +303,23 @@ test('flushing while a batch waits writes it and releases its broadcasts', async
   await new Promise((res) => setImmediate(res));
   assert.equal(a.last('Op')?.rev, 1);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('snapshots remember the last edit they hold from each replica (seen)', async () => {
+  const { r, a, done } = await started();
+  const b = member('b');
+  r.join(b);
+  r.message('a', op('a', 1));
+  r.message('b', op('b', 1));
+  r.message('a', op('a', 2));
+  r.message('a', { t: 'Snapshot', rev: 2, doc: '{"v":2}' });
+  r.message('b', { t: 'ResyncRequest', have: 0 });
+  r.message('a', { t: 'ResyncRequest', have: 0 });
+  assert.equal(b.last('Resync').seen, 1, "b's first edit is in the snapshot at rev 2");
+  assert.equal(a.last('Resync').seen, 1, "only a's first edit is; its second is in the log");
+  const late = member('a');
+  r.leave('a');
+  r.join(late);
+  assert.equal(late.got[0].seen, 1);
+  await done();
 });

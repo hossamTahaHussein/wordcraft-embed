@@ -20,7 +20,8 @@ export class Room {
     this.setTimer = setTimer;
     this.clearTimer = clearTimer;
     this.limits = { ...LIMITS, ...limits };
-    /** @type {{rev: number, doc: string} | null} */
+    /** The latest snapshot; `seen` is the last edit (seq) it holds from each replica.
+     * @type {{rev: number, doc: string, seen?: Record<string, number>} | null} */
     this.snapshot = null;
     this.log = [];
     /** Members in join order (the first editor holds the autosave lease). */
@@ -80,7 +81,7 @@ export class Room {
     if (Number.isInteger(haveRev) && haveRev >= base && haveRev <= this.rev) {
       member.send({ t: 'Welcome', rev: haveRev, snapshot: null, ops: this.log.filter((o) => o.rev > haveRev), you: member.client });
     } else {
-      member.send({ t: 'Welcome', rev: base, snapshot: this.snapshot.doc, ops: this.log, you: member.client });
+      member.send({ t: 'Welcome', rev: base, snapshot: this.snapshot.doc, ops: this.log, you: member.client, seen: this.seenBy(member.client) });
     }
   }
 
@@ -154,7 +155,7 @@ export class Room {
     if (!this.snapshot) {
       // Revision 0, from the member who opened the document.
       if (msg.rev !== 0 || member.client !== this.bootstrapper) return;
-      this.snapshot = { rev: 0, doc: msg.doc };
+      this.snapshot = { rev: 0, doc: msg.doc, seen: {} };
       this.store.writeSnapshot(this.id, this.snapshot, []);
       for (const c of this.waiting.splice(0)) {
         const m = this.members.get(c);
@@ -163,14 +164,21 @@ export class Room {
       return;
     }
     if (msg.rev <= this.snapshot.rev || msg.rev > this.rev) return;
+    const seen = { ...this.snapshot.seen };
+    for (const o of this.log) if (o.rev <= msg.rev) seen[o.client] = o.seq;
     this.log = this.log.filter((o) => o.rev > msg.rev);
-    this.snapshot = { rev: msg.rev, doc: msg.doc };
+    this.snapshot = { rev: msg.rev, doc: msg.doc, seen };
     this.store.writeSnapshot(this.id, this.snapshot, this.log);
   }
 
   resync(member) {
     if (!this.snapshot) return;
-    member.send({ t: 'Resync', rev: this.snapshot.rev, snapshot: this.snapshot.doc, ops: this.log });
+    member.send({ t: 'Resync', rev: this.snapshot.rev, snapshot: this.snapshot.doc, ops: this.log, seen: this.seenBy(member.client) });
+  }
+
+  /** The last edit of `client`'s the snapshot holds (0 for none). */
+  seenBy(client) {
+    return this.snapshot?.seen?.[client] ?? 0;
   }
 
   /** Compare fingerprints at one revision: whoever disagrees with the majority (on a tie, with
