@@ -29,7 +29,7 @@
     "fetch-editor": "node scripts/fetch-editor.mjs",
     "start": "node examples/server.mjs",
     "test": "node --test 'relay/test/*.test.mjs' 'test/*.test.mjs'",
-    "test:e2e": "node --test test/e2e/collab.e2e.mjs test/e2e/api.e2e.mjs test/e2e/agent.e2e.mjs"
+    "test:e2e": "node --test test/e2e/collab.e2e.mjs test/e2e/api.e2e.mjs test/e2e/agent.e2e.mjs test/e2e/roles.e2e.mjs"
   },
   "keywords": [
     "word",
