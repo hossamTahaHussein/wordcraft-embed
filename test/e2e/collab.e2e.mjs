@@ -172,3 +172,18 @@ test('people see each other: a count, coloured carets, and someone leaving', asy
   await chen.context.close();
   await waitFor(async () => (await statuses()).every((t) => t.includes('2 people')), 'Chen to leave', 35_000);
 });
+
+test('Ctrl+Z undoes your own edit for everyone and leaves the others', async () => {
+  const [ann, bob] = pages.map((p) => p.page);
+  await toOwnLines();
+  await ann.keyboard.type(' Ann regrets this.', { delay: 20 });
+  await sleep(1500);
+  await bob.keyboard.type(' Bob keeps this.', { delay: 20 });
+  await sleep(1500);
+  await ann.keyboard.press('Control+z');
+  const typedAt = Date.now();
+  await sleep(1500);
+  await bob.keyboard.press('Control+s');
+  await waitFor(() => statSync(file).mtimeMs > typedAt && !docText(file).includes('Ann regrets'), 'the undo to reach Bob', 20_000);
+  assert.match(docText(file), /Bob keeps this\./);
+});

@@ -93,3 +93,20 @@ test('who made an edit is remembered across snapshots and restarts', async () =>
   await done();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('an undo of a run of typing names every edit in it, all of them the sender\'s', async () => {
+  const { r, a, done } = await room();
+  const b = member('b');
+  r.join(b);
+  r.message('a', op('a', 1));
+  r.message('a', op('a', 2));
+  r.message('b', op('b', 1));
+  r.message('a', op('a', 3, { kind: 'undo', cmd: 'collab.undo', params: { target: 2, more: [1] } }));
+  r.message('a', op('a', 4, { kind: 'undo', cmd: 'collab.undo', params: { target: 2, more: ['x'] } }));
+  r.message('b', op('b', 2, { kind: 'undo', cmd: 'collab.undo', params: { target: 3, more: [1] } }));
+  await r.flush();
+  assert.deepEqual(a.all('Op').map((o) => o.kind), ['cmd', 'cmd', 'cmd', 'undo'], 'both are Ann\'s: sequenced');
+  assert.equal(a.last('Refused').reason, 'There is no such change to undo');
+  assert.equal(b.last('Refused').reason, 'You can only undo your own changes');
+  await done();
+});

@@ -375,9 +375,13 @@ export class Room {
       if (!allowed) return REFUSED.comment;
     }
     if (msg.kind === 'undo' || msg.kind === 'redo') {
-      const target = msg.params?.target;
-      if (!Number.isSafeInteger(target) || target < 1 || target > this.rev) return 'There is no such change to undo';
-      if (this.authors.get(target) !== member.sub) return 'You can only undo your own changes';
+      // `target`, and `more`: the rest of a run of typing undone as one step.
+      const more = msg.params?.more ?? [];
+      if (!Array.isArray(more) || more.length > 1000) return 'There is no such change to undo';
+      for (const target of [msg.params?.target, ...more]) {
+        if (!Number.isSafeInteger(target) || target < 1 || target > this.rev) return 'There is no such change to undo';
+        if (this.authors.get(target) !== member.sub) return 'You can only undo your own changes';
+      }
     }
     return null;
   }
