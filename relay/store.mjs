@@ -1,10 +1,11 @@
 // Relay persistence: per room, the latest snapshot and the ops after it, so a relay restart
 // loses nothing. DATA_DIR/<room hash>/snapshot.json (written whole, synced, then renamed),
-// ops.jsonl (appended in batches, synced) and meta.json (the last saved revision). Writes for one
-// room happen in order.
+// ops.jsonl (appended in batches, synced) and meta.json (the last saved revision). Versions are
+// versions/<rev>.json ({ rev, at, users, doc }) with versions/index.json listing them without
+// their documents. Writes for one room happen in order.
 
 import { createHash } from 'node:crypto';
-import { mkdir, open, readFile, rename, truncate } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, rename, rm, stat, truncate } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export function createStore(dataDir, { flushMs = 20 } = {}) {
@@ -151,5 +152,57 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
     },
 
     flush,
+
+    /** Whether the room was ever stored. */
+    async exists(id) {
+      try {
+        return (await stat(dirOf(id))).isDirectory();
+      } catch {
+        return false;
+      }
+    },
+
+    /** The room's versions without their documents, oldest first. */
+    async loadVersions(id) {
+      const dir = join(dirOf(id), 'versions');
+      try {
+        return JSON.parse(await readFile(join(dir, 'index.json'), 'utf8'));
+      } catch {}
+      // No index (or a torn one): read the versions themselves.
+      const list = [];
+      let names = [];
+      try {
+        names = await readdir(dir);
+      } catch {}
+      for (const name of names) {
+        if (!/^\d+\.json$/.test(name)) continue;
+        try {
+          const { rev, at, users } = JSON.parse(await readFile(join(dir, name), 'utf8'));
+          list.push({ rev, at, users });
+        } catch {}
+      }
+      return list.sort((a, b) => a.rev - b.rev);
+    },
+
+    /** One version ({ rev, at, users, doc }), or null when it is gone. */
+    async readVersion(id, rev) {
+      await state(id).chain;
+      try {
+        return JSON.parse(await readFile(join(dirOf(id), 'versions', `${rev}.json`), 'utf8'));
+      } catch {
+        return null;
+      }
+    },
+
+    /** Store `version`, remove the versions `drop` (revisions), and write the new `index`. */
+    writeVersion(id, version, drop, index) {
+      return queue(id, async () => {
+        const dir = join(dirOf(id), 'versions');
+        await mkdir(dir, { recursive: true });
+        await replaceFile(dir, `${version.rev}.json`, JSON.stringify(version));
+        await replaceFile(dir, 'index.json', JSON.stringify(index));
+        for (const rev of drop) await rm(join(dir, `${rev}.json`), { force: true });
+      });
+    },
   };
 }

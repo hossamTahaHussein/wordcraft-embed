@@ -23,6 +23,8 @@ const HELLO_TIMEOUT_MS = 10_000;
 const CLIENT_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const MAX_HELLO_BYTES = 16 * 1024;
 const PING_EVERY_MS = 30_000;
+/** Messages that may carry a whole document (up to MAX_SNAPSHOT_BYTES); the rest are ops-sized. */
+const LARGE = new Set(['Snapshot', 'Version', 'Exported', 'RunResult']);
 
 /**
  * @param {{secret: string, dataDir: string, server?: import('node:http').Server, port?: number, host?: string, path?: string,
@@ -111,7 +113,7 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         room.join(me, Number.isInteger(msg.haveRev) ? msg.haveRev : undefined);
         return;
       }
-      if (msg?.t !== 'Snapshot' && text.length > MAX_OP_BYTES) return close(1009, 'Message too large');
+      if (text.length > MAX_OP_BYTES && !LARGE.has(msg?.t) && !(msg?.t === 'Op' && msg.kind === 'restore')) return close(1009, 'Message too large');
       room.message(client, msg);
     });
 

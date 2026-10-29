@@ -18,7 +18,24 @@ export const LIMITS = {
   maxSaveDelayMs: 10000,
   resyncEveryMs: 5000,
   maxHistory: 2000,
+  versionEveryMs: 10 * 60 * 1000,
+  maxVersions: 100,
 };
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Which versions to keep (`list` oldest first): all from the last 24 hours, then the newest of
+ * each calendar day (UTC), at most `max` of them, the newest. */
+export function thinVersions(list, now, max = LIMITS.maxVersions) {
+  const kept = [];
+  for (let i = 0; i < list.length; i++) {
+    const v = list[i];
+    const recent = Date.parse(v.at) >= now - DAY_MS;
+    const newestOfDay = i === list.length - 1 || list[i + 1].at.slice(0, 10) !== v.at.slice(0, 10);
+    if (recent || newestOfDay) kept.push(v);
+  }
+  return kept.slice(-max);
+}
 
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 /** The commands a commenter may run (generated from the engine registry). */
@@ -112,6 +129,12 @@ export class Room {
     /** Who (sub) made each recent revision, for undo checks. On disk with each op and, for the
      * last `maxHistory` revisions before it, with the snapshot. */
     this.authors = new Map();
+    /** Stored versions without their documents, oldest first. */
+    this.versions = [];
+    /** The version asked for: { rev, client }. */
+    this.versionAsk = null;
+    /** Who made each revision since the newest version: [rev, name]. */
+    this.editedSince = [];
   }
 
   get rev() {
@@ -138,6 +161,9 @@ export class Room {
     this.savedRev = Math.min(meta?.savedRev ?? 0, this.rev);
     for (const [client, seq] of Object.entries(snapshot?.seen ?? {})) this.lastSeq.set(client, seq);
     for (const o of ops) this.lastSeq.set(o.client, o.seq);
+    this.versions = await this.store.loadVersions(this.id);
+    const newest = this.versions.at(-1)?.rev ?? 0;
+    this.editedSince = this.log.filter((o) => o.rev > newest).map((o) => [o.rev, o.user]);
   }
 
   flush() {
@@ -283,8 +309,15 @@ export class Room {
           this.savedRev = Math.min(msg.rev, this.rev);
           this.store.writeMeta(this.id, { savedRev: this.savedRev });
           this.events('saved', { rev: this.savedRev });
+          if (member === this.holder) this.askVersion(member, this.savedRev);
         }
         return;
+      case 'Version':
+        return this.takeVersion(member, msg);
+      case 'Versions':
+        return member.send({ t: 'VersionList', versions: [...this.versions].reverse().map(({ rev, at, users }) => ({ rev, at, users })) });
+      case 'GetVersion':
+        return this.sendVersion(member, msg.rev);
       case 'ResyncRequest':
         return this.resync(member);
     }
@@ -330,6 +363,7 @@ export class Room {
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
     this.log.push(op);
     this.authors.set(op.rev, member.sub);
+    this.editedSince.push([op.rev, op.user]);
     // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
     // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
     this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
@@ -394,6 +428,40 @@ export class Room {
     for (const [r, sub] of this.authors) if (r <= rev) authors[r] = sub;
     const ops = this.log.map((o) => ({ ...o, sub: this.authors.get(o.rev) }));
     this.store.writeSnapshot(this.id, { ...this.snapshot, authors }, ops);
+  }
+
+  /** A save at `rev` landed: keep it as a version when there is none yet, the newest is 10
+   * minutes old, or the holder is the last editor here (the session is ending). */
+  askVersion(holder, rev) {
+    const newest = this.versions.at(-1);
+    if (newest && rev <= newest.rev) return;
+    const othersEditing = [...this.members.values()].some((m) => m !== holder && m.role === 'edit');
+    if (newest && this.now() - Date.parse(newest.at) < this.limits.versionEveryMs && othersEditing) return;
+    this.versionAsk = { rev, client: holder.client };
+    holder.send({ t: 'VersionRequest', rev });
+  }
+
+  takeVersion(member, msg) {
+    const ask = this.versionAsk;
+    if (!ask || ask.client !== member.client || msg.rev !== ask.rev || typeof msg.doc !== 'string') return;
+    this.versionAsk = null;
+    const users = [...new Set(this.editedSince.filter(([rev]) => rev <= ask.rev).map(([, name]) => name))];
+    this.editedSince = this.editedSince.filter(([rev]) => rev > ask.rev);
+    const version = { rev: ask.rev, at: new Date(this.now()).toISOString(), users, doc: msg.doc };
+    const all = [...this.versions, { rev: version.rev, at: version.at, users }];
+    this.versions = thinVersions(all, this.now(), this.limits.maxVersions);
+    const drop = all.filter((v) => !this.versions.includes(v)).map((v) => v.rev);
+    this.store.writeVersion(this.id, version, drop, this.versions);
+  }
+
+  /** Answer GetVersion; answers go out in the order asked. */
+  sendVersion(member, rev) {
+    if (!Number.isSafeInteger(rev)) return;
+    const known = this.versions.some((x) => x.rev === rev);
+    this.reads = (this.reads ?? Promise.resolve()).then(async () => {
+      const v = known ? await this.store.readVersion(this.id, rev) : null;
+      member.send({ t: 'VersionDoc', rev, doc: typeof v?.doc === 'string' ? v.doc : null });
+    });
   }
 
   resync(member) {

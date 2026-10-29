@@ -138,3 +138,18 @@ test('hello with agent: true joins as an agent, which never opens the document',
   bot.ws.close();
   p.ws.close();
 });
+
+test('a Version may be as large as a snapshot', async () => {
+  const a = await connect();
+  a.send({ t: 'hello', token: token({ doc: 'doc-version' }), client: 'cv' });
+  await a.next('Welcome');
+  a.send({ t: 'Snapshot', rev: 0, doc: '{}' });
+  a.send(op(1, 'x'));
+  await a.next('Op');
+  a.send({ t: 'Saved', rev: 1 });
+  assert.equal((await a.next('VersionRequest')).rev, 1);
+  a.send({ t: 'Version', rev: 1, doc: 'x'.repeat(300 * 1024) });
+  a.send({ t: 'GetVersion', rev: 1 });
+  assert.equal((await a.next('VersionDoc')).doc.length, 300 * 1024);
+  a.ws.close();
+});
