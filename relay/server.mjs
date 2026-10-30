@@ -35,7 +35,8 @@ const FORMATS = {
   odt: 'application/vnd.oasis.opendocument.text',
   rtf: 'application/rtf',
 };
-/** Messages that may carry a whole document (up to MAX_SNAPSHOT_BYTES); the rest are ops-sized. */
+/** Messages an editor may send carrying a whole document (up to MAX_SNAPSHOT_BYTES); the rest,
+ * and everything from other roles, are ops-sized. */
 const LARGE = new Set(['Snapshot', 'Version', 'Exported', 'RunResult']);
 
 /** Compare two strings in constant time (whatever their lengths). */
@@ -194,6 +195,10 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
     ws.on('message', async (data, isBinary) => {
       if (isBinary) return close(1003, 'Text messages only');
       const text = data.toString();
+      // Checked before parsing: nothing large before the token is checked, and only an
+      // editor's messages may be document-sized.
+      if (!room && text.length > MAX_HELLO_BYTES) return close(1009, 'Say hello first');
+      if (room && me.role !== 'edit' && text.length > MAX_OP_BYTES) return close(1009, 'Message too large');
       let msg;
       try {
         msg = JSON.parse(text);
@@ -201,8 +206,6 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         return close(1007, 'Not JSON');
       }
       if (!room) {
-        // Nothing large before the token is checked.
-        if (text.length > MAX_HELLO_BYTES) return close(1009, 'Say hello first');
         if (client) return; // hello is being handled
         if (msg?.t !== 'hello') return close(4401, 'Say hello first');
         if (typeof msg.client !== 'string' || !CLIENT_ID.test(msg.client)) return close(4400, 'Bad client id');
@@ -222,7 +225,10 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
         room.join(me, Number.isInteger(msg.haveRev) ? msg.haveRev : undefined);
         return;
       }
-      if (text.length > MAX_OP_BYTES && !LARGE.has(msg?.t) && !(msg?.t === 'Op' && msg.kind === 'restore')) return close(1009, 'Message too large');
+      // Only an editor sends whole documents (snapshots, versions, exports, API results,
+      // restores); from anyone else, a message that size is too large like any other.
+      const large = me.role === 'edit' && (LARGE.has(msg?.t) || (msg?.t === 'Op' && msg.kind === 'restore'));
+      if (text.length > MAX_OP_BYTES && !large) return close(1009, 'Message too large');
       room.message(client, msg);
     });
 

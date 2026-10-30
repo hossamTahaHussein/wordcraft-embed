@@ -119,6 +119,35 @@ test('an oversized op closes with 1009', async () => {
   assert.equal((await a.closed).code, 1009);
 });
 
+test('only editors may send document-sized messages; a viewer or commenter is held to the op limit', { timeout: 5000 }, async () => {
+  const e = await connect();
+  e.send({ t: 'hello', token: token({ doc: 'doc-big-roles' }), client: 'cbe' });
+  await e.next('Welcome');
+  e.send({ t: 'Snapshot', rev: 0, doc: '{}' });
+  const big = 'x'.repeat(300 * 1024);
+  const large = [
+    { t: 'Version', rev: 0, doc: big },
+    { t: 'Exported', id: 'x', ok: true, data: big },
+    { t: 'RunResult', id: 'x', ok: true, result: big },
+    { t: 'Snapshot', rev: 0, doc: big },
+    { ...op(1, 'x'), kind: 'restore', cmd: 'collab.restore', params: { version: 1, doc: big } },
+  ];
+  for (const role of ['view', 'comment']) {
+    for (const [i, m] of large.entries()) {
+      const c = await connect();
+      c.send({ t: 'hello', token: token({ doc: 'doc-big-roles', sub: `${role}${i}`, role }), client: `c${role}${i}` });
+      await c.next('Welcome');
+      c.send(m);
+      assert.equal((await c.closed).code, 1009, `${role} sending a large ${m.t} ${m.kind ?? ''}`);
+    }
+  }
+  // An editor may: the connection stays open (a Version nobody asked for is ignored).
+  e.send({ t: 'Version', rev: 0, doc: big });
+  e.send({ t: 'Versions' });
+  assert.equal((await e.next('VersionList')).t, 'VersionList');
+  e.ws.close();
+});
+
 test('a bad client id is refused', async () => {
   const a = await connect();
   a.send({ t: 'hello', token: token(), client: 'x'.repeat(500) });
