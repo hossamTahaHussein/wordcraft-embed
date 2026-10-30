@@ -439,14 +439,15 @@ class CollabLink {
     if (this.stopped) return;
     const ws = new this.WS(this.url);
     this.ws = ws;
+    // Online (and the backoff reset) only once the relay welcomes this connection: one it
+    // closes right away (too many people, replaced, refused) must not restart the editor's
+    // offline clock.
     ws.onopen = () => {
-      this.delay = this.retry[0];
       const hello = { t: 'hello', token, client: this.client };
       if (this.rev !== null) hello.haveRev = this.rev;
       ws.send(JSON.stringify(hello));
-      this.setConnected(true);
     };
-    ws.onmessage = (event) => this.fromRelay(String(event.data));
+    ws.onmessage = (event) => this.fromRelay(String(event.data), ws);
     ws.onclose = (event) => {
       if (this.ws !== ws) return;
       this.ws = null;
@@ -470,9 +471,13 @@ class CollabLink {
     this.delay = Math.min(this.delay * 2, this.retry[1]);
   }
 
-  fromRelay(text) {
+  fromRelay(text, ws) {
     // The first person (no snapshot yet) opens the document; everyone else gets the shared copy.
     if (text.startsWith('{"t":"Welcome"')) {
+      if (ws && ws === this.ws && !this.connected) {
+        this.delay = this.retry[0];
+        this.setConnected(true);
+      }
       try {
         const welcome = JSON.parse(text);
         if (welcome.snapshot === null && this.rev === null && this.editor.options.document != null) {

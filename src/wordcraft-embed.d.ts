@@ -61,6 +61,7 @@ export interface WordCraftError extends Error {
 }
 
 export interface CollabStatus {
+  /** In the document: the relay has welcomed this connection (an open socket alone isn't). */
   connected: boolean;
   /** Edits made here that the relay hasn't confirmed yet. */
   pending: number;

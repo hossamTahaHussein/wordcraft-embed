@@ -220,6 +220,7 @@ test('collab status events carry connection and pending edits', async () => {
   const { made, page, editor } = await setup();
   editor.addEventListener('collab', (e) => seen.push({ ...e.detail }));
   made[0].open();
+  made[0].relay({ t: 'Welcome', rev: 3, snapshot: '{}', ops: [], you: 'c' });
   await tick();
   page.fromEditor({ type: 'wordcraft:collab.status', pending: 2, rev: 4 });
   assert.deepEqual(seen.at(-1), { connected: true, pending: 2, rev: 4, people: 1 });
@@ -436,4 +437,62 @@ test('the element refuses calls with a rejected promise before it is connected',
     assert.doesNotThrow(() => { result = call(); });
     await assert.rejects(result, /not in the page/);
   }
+});
+
+/** The Connection messages the editor frame was sent. */
+const connections = (frame) =>
+  frame.posted
+    .filter((m) => m.type === 'wordcraft:collab')
+    .map((m) => JSON.parse(m.msg))
+    .filter((m) => m.t === 'Connection')
+    .map((m) => m.online);
+
+test("the editor is told it is online only once the relay's Welcome arrives", async () => {
+  const events = [];
+  const { made, frame, editor } = await setup();
+  editor.addEventListener('collab', (e) => events.push(e.detail.connected));
+  made[0].open();
+  await tick();
+  assert.deepEqual(connections(frame), [], 'open is not enough: the relay may still refuse');
+  assert.equal(events.includes(true), false);
+  made[0].relay({ t: 'Welcome', rev: 3, snapshot: '{}', ops: [], you: 'c' });
+  assert.deepEqual(connections(frame), [true]);
+  assert.equal(events.at(-1), true);
+  made[0].relay({ t: 'Welcome', rev: 3, snapshot: '{}', ops: [], you: 'c' });
+  assert.deepEqual(connections(frame), [true], 'once per connection');
+  made[0].drop(1006);
+  assert.deepEqual(connections(frame), [true, false]);
+  editor.destroy();
+});
+
+test('a connection the relay closes before welcoming it never tells the editor it is online', async () => {
+  const { made, frame, editor } = await setup({ retryMs: [5, 20] });
+  for (const code of [4429, 4000, 1006]) {
+    made.at(-1).open();
+    made.at(-1).drop(code);
+    await tick(40);
+  }
+  assert.equal(made.length, 4);
+  assert.equal(connections(frame).includes(true), false, `the offline clock keeps running: ${connections(frame)}`);
+  editor.destroy();
+});
+
+test('reconnecting backs off until a connection is welcomed, not just opened', async () => {
+  const { made, editor } = await setup({ retryMs: [20, 200] });
+  made[0].open();
+  made[0].drop(4429);
+  await tick(30);
+  assert.equal(made.length, 2, 'first retry after 20 ms');
+  made[1].open();
+  made[1].drop(4429);
+  await tick(30);
+  assert.equal(made.length, 2, 'the next waits 40 ms: opening did not reset the backoff');
+  await tick(30);
+  assert.equal(made.length, 3);
+  made[2].open();
+  made[2].relay({ t: 'Welcome', rev: 3, snapshot: '{}', ops: [], you: 'c' });
+  made[2].drop(1006);
+  await tick(30);
+  assert.equal(made.length, 4, 'welcomed: back to 20 ms');
+  editor.destroy();
 });
