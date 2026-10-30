@@ -4,7 +4,7 @@ Put a full Word-style editor in any website, and let people write in it together
 and save `.docx` files in the page, several people (and AI agents) can edit one document at once,
 and your site decides where the files go.
 
-Version 1.0.1, by [Hossam Taha](https://hossamtaha.me).
+Version 1.0.2, by [Hossam Taha](https://hossamtaha.me).
 
 <img src="docs/images/coediting.png" alt="Three people in one document: Bob Diaz types with his name flag above his caret, Cara Ng has two words selected, and the header shows their avatars and All changes saved" width="100%">
 
@@ -54,7 +54,7 @@ differ.
 ## Try the demo
 
 ```sh
-npm run fetch-editor      # downloads WordCraft Collab 1.0.1 (~21 MB zip) into editor/
+npm run fetch-editor      # downloads WordCraft Collab 1.0.2 (~21 MB zip) into editor/
 npm start                 # http://localhost:8080
 ```
 
@@ -399,7 +399,7 @@ revision, waiting for it), `comment` and `reply`.
 ## Updating the editor
 
 ```sh
-node scripts/fetch-editor.mjs latest     # or a version: node scripts/fetch-editor.mjs 1.0.1
+node scripts/fetch-editor.mjs latest     # or a version: node scripts/fetch-editor.mjs 1.0.2
 ```
 
 Releases come from [wordcraft-collab](https://github.com/hossamTahaHussein/wordcraft-collab/releases).
