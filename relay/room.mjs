@@ -73,6 +73,12 @@ const REFUSED = {
   suggest: 'You can only suggest changes in this document',
 };
 const isCount = (n) => Number.isSafeInteger(n) && n >= 0;
+/** The roles that may undo or redo an edit of their own, by what the edit `needs` (see `needs`). */
+const MAY_UNDO = {
+  edit: new Set(['comment', 'suggest', 'edit']),
+  suggest: new Set(['comment', 'suggest']),
+  comment: new Set(['comment']),
+};
 
 const PALETTE_SIZE = 12;
 /** The largest story part index and offset a replica can hold (u32). */
@@ -152,6 +158,10 @@ export class Room {
     /** Who (sub) made each recent revision, for undo checks. On disk with each op and, for the
      * last `maxHistory` revisions before it, with the snapshot. */
     this.authors = new Map();
+    /** The least role that may undo or redo each recent revision ('comment' | 'suggest' |
+     * 'edit', see `needs`), kept and stored like `authors`. A revision without one (stored by
+     * an older relay) needs 'edit'. */
+    this.needed = new Map();
     /** Stored versions without their documents, oldest first. */
     this.versions = [];
     /** The version asked for: { rev, client }. */
@@ -181,10 +191,15 @@ export class Room {
   async load() {
     const { snapshot, ops, meta } = await this.store.load(this.id);
     for (const [rev, sub] of Object.entries(snapshot?.authors ?? {})) this.authors.set(Number(rev), sub);
-    if (snapshot) delete snapshot.authors;
+    for (const [rev, role] of Object.entries(snapshot?.needs ?? {})) if (Object.hasOwn(MAY_UNDO, role)) this.needed.set(Number(rev), role);
+    if (snapshot) {
+      delete snapshot.authors;
+      delete snapshot.needs;
+    }
     this.snapshot = snapshot;
-    this.log = ops.map(({ sub, ...o }) => {
+    this.log = ops.map(({ sub, needs, ...o }) => {
       if (typeof sub === 'string') this.authors.set(o.rev, sub);
+      if (Object.hasOwn(MAY_UNDO, needs)) this.needed.set(o.rev, needs);
       return o;
     });
     this.durableRev = this.rev;
@@ -400,9 +415,27 @@ export class Room {
       for (const target of [msg.params?.target, ...more]) {
         if (!Number.isSafeInteger(target) || target < 1 || target > this.rev) return 'There is no such change to undo';
         if (this.authors.get(target) !== member.sub) return 'You can only undo your own changes';
+        // By the role they have now: someone who edited and now only comments can't take
+        // their old edits back (or bring them back).
+        if (!MAY_UNDO[member.role]?.has(this.needed.get(target) ?? 'edit')) return REFUSED[member.role] ?? REFUSED.view;
       }
     }
     return null;
+  }
+
+  /** The least role that may undo or redo `msg` (an allowed op): 'comment' for a comment
+   * command, 'suggest' for a tracked suggest command, else 'edit'; an undo or redo needs what
+   * the most any of its targets needs (so a redo of an undone comment is still a comment). */
+  needs(msg) {
+    if (msg.kind === 'cmd') {
+      if (COMMENT_COMMANDS.has(msg.cmd)) return 'comment';
+      return msg.ctx?.track === true && SUGGEST_COMMANDS.has(msg.cmd) ? 'suggest' : 'edit';
+    }
+    if (msg.kind === 'undo' || msg.kind === 'redo') {
+      const all = [msg.params?.target, ...(msg.params?.more ?? [])].map((t) => this.needed.get(t) ?? 'edit');
+      return all.includes('edit') ? 'edit' : all.includes('suggest') ? 'suggest' : 'comment';
+    }
+    return 'edit';
   }
 
   op(member, msg) {
@@ -466,12 +499,14 @@ export class Room {
   sequence(member, msg) {
     const { t: _t, rev: _rev, user: _user, ...fields } = msg;
     const op = { t: 'Op', ...fields, client: member.client, rev: this.rev + 1, user: member.user };
+    const needs = this.needs(msg);
     this.log.push(op);
     this.authors.set(op.rev, member.sub);
+    this.needed.set(op.rev, needs);
     this.editedSince.push([op.rev, op.user]);
     // Broadcast only once the op is on disk: a relay that crashes and restarts never forgets an
     // edit somebody already has. Ops reach the disk, and so everyone, in revision order.
-    const durable = this.store.append(this.id, { ...op, sub: member.sub }).then(() => {
+    const durable = this.store.append(this.id, { ...op, sub: member.sub, needs }).then(() => {
       this.durableRev = Math.max(this.durableRev, op.rev);
       for (const m of this.members.values()) m.send(op);
       this.events('edited', { rev: op.rev, name: op.user });
@@ -545,10 +580,13 @@ export class Room {
   writeSnapshot() {
     const rev = this.snapshot.rev;
     for (const r of this.authors.keys()) if (r <= rev - this.limits.maxHistory) this.authors.delete(r);
+    for (const r of this.needed.keys()) if (r <= rev - this.limits.maxHistory) this.needed.delete(r);
     const authors = {};
     for (const [r, sub] of this.authors) if (r <= rev) authors[r] = sub;
-    const ops = this.log.map((o) => ({ ...o, sub: this.authors.get(o.rev) }));
-    this.store.writeSnapshot(this.id, { ...this.snapshot, authors }, ops);
+    const needs = {};
+    for (const [r, role] of this.needed) if (r <= rev) needs[r] = role;
+    const ops = this.log.map((o) => ({ ...o, sub: this.authors.get(o.rev), needs: this.needed.get(o.rev) }));
+    this.store.writeSnapshot(this.id, { ...this.snapshot, authors, needs }, ops);
   }
 
   /** Everyone here, as the HTTP API lists them. */

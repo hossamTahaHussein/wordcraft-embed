@@ -259,6 +259,10 @@ allow is refused (the sender's editor is told why) and never reaches anyone else
 | `comment` | Add, reply to, edit, resolve and delete comments (the commands in `relay/comment-commands.json`), and undo those |
 | `view` | Read, and see the others' edits and cursors as they happen |
 
+Undo and Redo follow the role a person has now: someone who edited and later joins as a
+commenter can undo only their comments, and as a suggester only their comments and tracked
+suggestions, not their earlier edits.
+
 Only editors save: the autosave goes to the editor who has been in the document longest. A
 document is opened (from `document`) by the first editor; a viewer or commenter who arrives
 first waits for one.
