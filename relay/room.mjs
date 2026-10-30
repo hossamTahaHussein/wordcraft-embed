@@ -25,6 +25,9 @@ export const LIMITS = {
   maxVersions: 100,
   /** How long a room nobody is in (and with nothing waiting) stays in memory. */
   idleEvictMs: 10 * 60 * 1000,
+  /** At most this many [rev, name] entries of who edited since the newest version are kept in
+   * meta.json, for the revisions only the snapshot holds (see `compactEdited`). */
+  maxEditedKept: 1000,
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -54,6 +57,26 @@ export function thinVersions(list, now, max = LIMITS.maxVersions) {
   }
   return kept.slice(-max);
 }
+
+/** Who edited (`editedSince`, [rev, name] in revision order) as kept on disk: of each run by
+ * one name only its first and last revision; past `max` entries, only each name's first and
+ * last; then the newest `max`. A name is in the next version that reaches its first revision,
+ * and kept for a later one while its last revision is past that version. */
+export function compactEdited(pairs, max) {
+  let kept = pairs.filter(([, name], i) => name !== pairs[i - 1]?.[1] || name !== pairs[i + 1]?.[1]);
+  if (kept.length > max) {
+    const first = new Map();
+    const last = new Map();
+    for (const p of kept) {
+      if (!first.has(p[1])) first.set(p[1], p);
+      last.set(p[1], p);
+    }
+    kept = kept.filter((p) => first.get(p[1]) === p || last.get(p[1]) === p);
+  }
+  return kept.slice(-max);
+}
+
+const isEdited = (p) => Array.isArray(p) && Number.isSafeInteger(p[0]) && typeof p[1] === 'string';
 
 const OP_KINDS = new Set(['cmd', 'undo', 'redo', 'restore']);
 /** The commands a commenter may run (generated from the engine registry). */
@@ -174,8 +197,11 @@ export class Room {
     this.versions = [];
     /** The version asked for: { rev, client }. */
     this.versionAsk = null;
-    /** Who made each revision since the newest version: [rev, name]. */
+    /** Who made each revision since the newest version: [rev, name]. Those the snapshot holds
+     * (no longer in the log) are kept in meta.json too, written with the snapshot. */
     this.editedSince = [];
+    /** Those entries as last written to meta.json (JSON), to skip writing them unchanged. */
+    this.editedKept = '[]';
     /** Edits waiting while a restore's version loads ([member, msg]), or null. */
     this.held = null;
     /** When the last save landed (ISO), or null. */
@@ -217,7 +243,12 @@ export class Room {
     for (const o of ops) this.lastSeq.set(o.client, o.seq);
     this.versions = await this.store.loadVersions(this.id);
     const newest = this.versions.at(-1)?.rev ?? 0;
-    this.editedSince = this.log.filter((o) => o.rev > newest).map((o) => [o.rev, o.user]);
+    // Those the snapshot holds from meta.json (none in one an older relay wrote), the rest from
+    // the log: no revision from both.
+    const base = snapshot?.rev ?? 0;
+    const kept = (Array.isArray(meta?.editedSince) ? meta.editedSince : []).filter((p) => isEdited(p) && p[0] > newest && p[0] <= base);
+    this.editedKept = JSON.stringify(kept);
+    this.editedSince = [...kept, ...this.log.filter((o) => o.rev > newest).map((o) => [o.rev, o.user])];
     // Loaded for a lookup, maybe, with nobody coming.
     this.idleCountdown();
   }
@@ -403,7 +434,7 @@ export class Room {
         if (Number.isInteger(msg.rev) && msg.rev > this.savedRev) {
           this.savedRev = Math.min(msg.rev, this.rev);
           this.lastSaved = new Date(this.now()).toISOString();
-          this.store.writeMeta(this.id, { savedRev: this.savedRev, lastSaved: this.lastSaved });
+          this.writeMeta();
           this.events('saved', { rev: this.savedRev });
           if (member === this.holder) this.askVersion(member, this.savedRev);
         }
@@ -615,9 +646,26 @@ export class Room {
     this.freshWaiting.clear();
   }
 
+  /** The entries of `editedSince` meta.json keeps: those the snapshot holds, compacted. */
+  editedToKeep() {
+    const base = this.snapshot?.rev ?? 0;
+    return compactEdited(this.editedSince.filter(([rev]) => rev <= base), this.limits.maxEditedKept);
+  }
+
+  /** Store the last save and who edited since the newest version in revisions the snapshot
+   * holds (the log has the rest). */
+  writeMeta() {
+    const edited = this.editedToKeep();
+    this.editedKept = JSON.stringify(edited);
+    this.store.writeMeta(this.id, { savedRev: this.savedRev, lastSaved: this.lastSaved, editedSince: edited });
+  }
+
   /** Store the snapshot with who made the revisions before it, and the log after it. */
   writeSnapshot() {
     const rev = this.snapshot.rev;
+    // Who made the revisions leaving the log goes to meta.json first: a crash between the two
+    // writes leaves them in both, never in neither.
+    if (JSON.stringify(this.editedToKeep()) !== this.editedKept) this.writeMeta();
     for (const r of this.authors.keys()) if (r <= rev - this.limits.maxHistory) this.authors.delete(r);
     for (const r of this.needed.keys()) if (r <= rev - this.limits.maxHistory) this.needed.delete(r);
     const authors = {};

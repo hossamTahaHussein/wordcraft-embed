@@ -1,6 +1,7 @@
 // Relay persistence: per room, the latest snapshot and the ops after it, so a relay restart
 // loses nothing. DATA_DIR/<room hash>/snapshot.json (written whole, synced, then renamed),
-// ops.jsonl (appended in batches, synced) and meta.json (the last saved revision). Versions are
+// ops.jsonl (appended in batches, synced) and meta.json (the last saved revision, and who edited
+// since the newest version in revisions only the snapshot holds). Versions are
 // versions/<rev>.json ({ rev, at, users, doc }) with versions/index.json listing them without
 // their documents. Writes for one room happen in order.
 
@@ -93,7 +94,7 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
   }
 
   return {
-    /** @returns {Promise<{snapshot: object | null, ops: object[], meta: {savedRev?: number} | null}>} */
+    /** @returns {Promise<{snapshot: object | null, ops: object[], meta: {savedRev?: number, lastSaved?: string, editedSince?: [number, string][]} | null}>} */
     async load(id) {
       const dir = dirOf(id);
       let snapshot = null;

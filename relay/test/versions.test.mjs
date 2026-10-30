@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { Room, thinVersions } from '../room.mjs';
 import { createStore } from '../store.mjs';
 import { member, op, room, tick } from './helpers.mjs';
@@ -207,4 +207,118 @@ test('a version answered at a later revision (others edited since the save) is k
   const v = JSON.parse(readFileSync(join(versionsDir(dir), '2.json'), 'utf8'));
   assert.deepEqual([v.rev, v.doc, v.users], [2, '{"v":2}', ['A', 'B']]);
   await done();
+});
+
+/** a and b edit, then a snapshot takes their edits out of the log (snapshotEvery 2). */
+async function editedThenSnapshot(opts = {}) {
+  const t = await room({ start: START, limits: { snapshotEvery: 2 }, ...opts });
+  const b = member('b');
+  t.r.join(b);
+  t.r.message('a', op('a', 1));
+  t.r.message('b', op('b', 1));
+  await t.r.flush();
+  assert.ok(t.a.last('SnapshotRequest'), 'the holder is asked for a snapshot');
+  t.r.message('a', { t: 'Snapshot', rev: 2, doc: '{"v":2}' });
+  assert.equal(t.r.log.length, 0, 'their edits are only in the snapshot now');
+  // A save reported by b: meta is written again, and asks for no version.
+  t.r.message('b', { t: 'Saved', rev: 2 });
+  await settle(t.r);
+  return { ...t, b };
+}
+
+/** x joins `r` (loaded again), edits and saves: the version's users. */
+async function nextVersionUsers(r, dir) {
+  const x = member('x', { sub: 'a', user: 'A' });
+  r.join(x);
+  r.message('x', op('x', 1));
+  await r.flush();
+  r.message('x', { t: 'Saved', rev: 3 });
+  assert.equal(x.last('VersionRequest').rev, 3);
+  r.message('x', { t: 'Version', rev: 3, doc: '{"v":3}' });
+  await settle(r);
+  return JSON.parse(readFileSync(join(versionsDir(dir), '3.json'), 'utf8')).users;
+}
+
+test('who edited before a snapshot is still in the next version after a relay restart', async () => {
+  const { c, dir } = await editedThenSnapshot();
+  const again = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 0 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await again.load();
+  assert.deepEqual(await nextVersionUsers(again, dir), ['A', 'B']);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('who edited before a snapshot is still in the next version after the room is let go and loaded again', async () => {
+  const idle = [];
+  const { r, b, c, dir, store } = await editedThenSnapshot({ onIdle: (x) => idle.push(x) });
+  r.leave('a');
+  r.leave('b', b);
+  await settle(r);
+  c.advance(10 * MIN);
+  assert.deepEqual(idle, [r]);
+  const again = new Room({ id: 'doc-1', store, now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await again.load();
+  assert.deepEqual(await nextVersionUsers(again, dir), ['A', 'B']);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('who edited before the newest version is not carried into the next one after a restart', async () => {
+  const { r, a, c, dir } = await editedThenSnapshot();
+  // The version at 2 takes A and B; the snapshot's names are now spent.
+  r.message('a', op('a', 2));
+  await r.flush();
+  r.message('a', { t: 'Snapshot', rev: 3, doc: '{"v":3}' });
+  r.leave('b');
+  assert.equal(await saveVersion(r, a, 3), true);
+  assert.deepEqual(JSON.parse(readFileSync(join(versionsDir(dir), '3.json'), 'utf8')).users, ['A', 'B']);
+  const again = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 0 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await again.load();
+  const z = member('z', { user: 'Z' });
+  again.join(z);
+  again.message('z', op('z', 1));
+  await again.flush();
+  again.message('z', { t: 'Saved', rev: 4 });
+  again.message('z', { t: 'Version', rev: 4, doc: '{"v":4}' });
+  await settle(again);
+  assert.deepEqual(JSON.parse(readFileSync(join(versionsDir(dir), '4.json'), 'utf8')).users, ['Z']);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a meta.json from before it kept who edited still loads', async () => {
+  const { r, c, dir } = await room({ start: START });
+  r.message('a', op('a', 1));
+  await r.flush();
+  r.message('a', { t: 'Saved', rev: 1 });
+  r.message('a', { t: 'Version', rev: 1, doc: '{"v":1}' });
+  r.message('a', op('a', 2));
+  await settle(r);
+  const meta = join(dirname(versionsDir(dir)), 'meta.json');
+  writeFileSync(meta, JSON.stringify({ savedRev: 1, lastSaved: new Date(START).toISOString() }));
+  const again = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 0 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await again.load();
+  assert.equal(again.savedRev, 1);
+  assert.deepEqual(again.editedSince, [[2, 'A']]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('who edited is kept on disk compactly, at most maxEditedKept entries', async () => {
+  const { r, a, c, dir } = await room({ start: START, limits: { snapshotEvery: 10, maxEditedKept: 6 } });
+  const b = member('b');
+  r.join(b);
+  // Runs: A A A, then A B alternating, then C.
+  const seq = { a: 0, b: 0 };
+  const by = ['a', 'a', 'a', 'a', 'b', 'a', 'b', 'a', 'b'];
+  for (const x of by) r.message(x, op(x, ++seq[x]));
+  const cc = member('c');
+  r.join(cc);
+  r.message('c', op('c', 1));
+  await r.flush();
+  assert.ok(r.log.length === 10 && a.last('SnapshotRequest'));
+  r.message('a', { t: 'Snapshot', rev: 10, doc: '{"v":10}' });
+  await settle(r);
+  const meta = JSON.parse(readFileSync(join(dirname(versionsDir(dir)), 'meta.json'), 'utf8'));
+  assert.ok(meta.editedSince.length <= 6, JSON.stringify(meta.editedSince));
+  const again = new Room({ id: 'doc-1', store: createStore(dir, { flushMs: 0 }), now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  await again.load();
+  assert.deepEqual([...new Set(again.editedSince.map(([, name]) => name))].sort(), ['A', 'B', 'C']);
+  rmSync(dir, { recursive: true, force: true });
 });
