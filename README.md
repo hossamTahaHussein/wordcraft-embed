@@ -205,7 +205,8 @@ It needs three things:
    its `dist/web` as `/wordcraft/`. The official release ignores `collab`.
 2. **The relay** (`relay/server.mjs`, Node 18+, one dependency: `ws`). It never reads documents;
    it puts edits in order, keeps the session and its versions on disk (`DATA_DIR`) and chooses
-   who autosaves.
+   who autosaves. A document nobody has had open for 10 minutes is let go from memory and read
+   from disk again when next needed (`createRelay({ …, limits: { idleEvictMs } })` changes the wait).
    Run it on its own (`RELAY_SECRET=… DATA_DIR=./relay-data node relay/server.mjs`, then proxy
    `wss://yoursite/relay` to it) or inside your Node server (`createRelay({ secret, dataDir, server })`).
 3. **Join tokens from your backend.** Only your site knows who is signed in, so it issues a short

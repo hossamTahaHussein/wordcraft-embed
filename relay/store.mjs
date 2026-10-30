@@ -18,7 +18,7 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
   function state(id) {
     let s = rooms.get(id);
     if (!s) {
-      s = { chain: Promise.resolve(), buffer: [], timer: null, durable: null, release: null };
+      s = { chain: Promise.resolve(), buffer: [], timer: null, durable: null, release: null, writing: 0 };
       rooms.set(id, s);
     }
     return s;
@@ -27,7 +27,11 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
   /** Run `task` after every earlier write of this room. */
   function queue(id, task) {
     const s = state(id);
-    s.chain = s.chain.then(task).catch((e) => console.error(`relay store (${id}):`, e));
+    s.writing++;
+    s.chain = s.chain
+      .then(task)
+      .catch((e) => console.error(`relay store (${id}):`, e))
+      .finally(() => s.writing--);
     return s.chain;
   }
 
@@ -152,6 +156,17 @@ export function createStore(dataDir, { flushMs = 20 } = {}) {
     },
 
     flush,
+
+    /** Whether nothing of the room's is waiting to be written. */
+    idle(id) {
+      const s = rooms.get(id);
+      return !s || (!s.buffer.length && !s.durable && s.writing === 0);
+    },
+
+    /** Let go of what the store holds for a room nothing is being written for. */
+    forget(id) {
+      if (this.idle(id)) rooms.delete(id);
+    },
 
     /** Whether the room was ever stored. */
     async exists(id) {

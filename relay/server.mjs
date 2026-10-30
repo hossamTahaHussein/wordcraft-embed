@@ -68,13 +68,14 @@ async function readJson(req) {
 
 /**
  * @param {{secret: string, dataDir: string, server?: import('node:http').Server, port?: number, host?: string, path?: string,
- *   apiKey?: string, apiTimeoutMs?: number, webhook?: {url?: string, secret?: string}}} options
+ *   apiKey?: string, apiTimeoutMs?: number, webhook?: {url?: string, secret?: string}, limits?: object}} options
  * Pass `server` to share an existing HTTP server, or `port` (0 = any) to listen on its own.
  * With a shared server, pass its requests to `relay.handle(req, res)` for the HTTP API.
  * `apiKey`: the bearer key of the HTTP API under /api/ (no key: no API).
  * `webhook`: where to POST events (both `url` and `secret`, or webhooks are off).
+ * `limits`: overrides of the rooms' LIMITS (room.mjs), such as `idleEvictMs`.
  */
-export async function createRelay({ secret, dataDir, server, port, host = '127.0.0.1', path = '/relay', apiKey, apiTimeoutMs = API_TIMEOUT_MS, webhook }) {
+export async function createRelay({ secret, dataDir, server, port, host = '127.0.0.1', path = '/relay', apiKey, apiTimeoutMs = API_TIMEOUT_MS, webhook, limits }) {
   const store = createStore(dataDir);
   const hooks = createWebhooks(webhook);
   const rooms = new Map();
@@ -103,16 +104,23 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
   }, PING_EVERY_MS);
   heartbeat.unref?.();
 
+  /** The room `id`, loaded from disk unless it is in memory. A room nobody is in is let go
+   * after `limits.idleEvictMs` (and loaded again when next needed). */
   async function roomFor(id) {
-    let entry = rooms.get(id);
-    if (!entry) {
-      const events = !hooks ? undefined : (type, detail) => (type === 'edited' ? hooks.edited(id, detail.rev, detail.name) : hooks.send(id, type, detail));
-      const room = new Room({ id, store, events });
-      entry = { room, ready: room.load() };
-      rooms.set(id, entry);
+    for (;;) {
+      let entry = rooms.get(id);
+      if (!entry) {
+        const events = !hooks ? undefined : (type, detail) => (type === 'edited' ? hooks.edited(id, detail.rev, detail.name) : hooks.send(id, type, detail));
+        const onIdle = (room) => {
+          if (rooms.get(id)?.room === room) rooms.delete(id);
+        };
+        const room = new Room({ id, store, events, limits, onIdle });
+        entry = { room, ready: room.load() };
+        rooms.set(id, entry);
+      }
+      await entry.ready;
+      if (!entry.room.evicted) return entry.room;
     }
-    await entry.ready;
-    return entry.room;
   }
 
   /** The HTTP API. Returns false for a request that isn't under /api/ (not the relay's). A
@@ -244,6 +252,8 @@ export async function createRelay({ secret, dataDir, server, port, host = '127.0
     get port() {
       return server.address()?.port;
     },
+    /** The documents whose rooms are in memory. */
+    loadedRooms: () => [...rooms.keys()],
     async close() {
       clearInterval(heartbeat);
       hooks?.close();

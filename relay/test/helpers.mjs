@@ -50,11 +50,11 @@ export function op(client, seq, fields = {}) {
 export const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 /** A loaded room on a fresh data dir with fake timers. `first`: a member that opens revision 0. */
-export async function room({ first = member('a'), events, limits, start = 0, dir } = {}) {
+export async function room({ first = member('a'), events, limits, start = 0, dir, onIdle } = {}) {
   dir ??= mkdtempSync(join(tmpdir(), 'wc-v2-'));
   const c = clock(start);
   const store = createStore(dir, { flushMs: 0 });
-  const r = new Room({ id: 'doc-1', store, now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer, events, limits });
+  const r = new Room({ id: 'doc-1', store, now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer, events, limits, onIdle });
   await r.load();
   if (first) {
     r.join(first);

@@ -23,6 +23,8 @@ export const LIMITS = {
   maxHistory: 2000,
   versionEveryMs: 10 * 60 * 1000,
   maxVersions: 100,
+  /** How long a room nobody is in (and with nothing waiting) stays in memory. */
+  idleEvictMs: 10 * 60 * 1000,
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -123,10 +125,16 @@ const canHold = (m) => m.role === 'edit' && !m.agent;
 
 export class Room {
   /** `events(type, detail)` hears what webhooks report: joined, left, saved, edited (one per
-   * op: { rev, name }), commented, restored. */
-  constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {}, events = () => {} }) {
+   * op: { rev, name }), commented, restored. `onIdle(room)`: the room has had nobody in it and
+   * nothing to do for `idleEvictMs`, everything on disk; the owner lets it go (a later lookup
+   * loads it again). */
+  constructor({ id, store, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, limits = {}, events = () => {}, onIdle = null }) {
     this.id = id;
     this.events = events;
+    this.onIdle = onIdle;
+    this.evictTimer = null;
+    /** Set once let go: nothing may use it any more. */
+    this.evicted = false;
     this.store = store;
     this.now = now;
     this.setTimer = setTimer;
@@ -210,6 +218,34 @@ export class Room {
     this.versions = await this.store.loadVersions(this.id);
     const newest = this.versions.at(-1)?.rev ?? 0;
     this.editedSince = this.log.filter((o) => o.rev > newest).map((o) => [o.rev, o.user]);
+    // Loaded for a lookup, maybe, with nobody coming.
+    this.idleCountdown();
+  }
+
+  /** Whether the room has nobody in it and nothing to finish: no API request waiting, no
+   * restore loading, joins not being refused, and everything written to disk. */
+  idle() {
+    return this.members.size === 0 && this.asks.size === 0 && !this.held && this.now() >= this.closedUntil && this.store.idle?.(this.id) !== false;
+  }
+
+  /** Start (again) counting down to letting the room go, when nobody is in it. */
+  idleCountdown() {
+    if (!this.onIdle || this.evicted || this.members.size) return;
+    this.clearTimer(this.evictTimer);
+    this.evictTimer = this.setTimer(() => this.evictIfIdle(), Math.max(this.limits.idleEvictMs, this.closedUntil - this.now()));
+    this.evictTimer?.unref?.();
+  }
+
+  evictIfIdle() {
+    this.evictTimer = null;
+    if (this.members.size) return;
+    // Something still to finish (writes landing, say): look again later.
+    if (!this.idle()) return this.idleCountdown();
+    this.evicted = true;
+    for (const t of [this.saveTimer, this.freshTimer]) this.clearTimer(t);
+    this.saveTimer = this.freshTimer = null;
+    this.store.forget?.(this.id);
+    this.onIdle(this);
   }
 
   flush() {
@@ -237,6 +273,8 @@ export class Room {
       return;
     }
     if (old) old.close(4000, 'Replaced by a newer connection');
+    this.clearTimer(this.evictTimer);
+    this.evictTimer = null;
     member.bucket = { tokens: this.limits.opsPerSecond, at: this.now() };
     member.presenceBucket = { tokens: this.limits.presencePerSecond, at: this.now() };
     member.resyncAt = -Infinity;
@@ -339,6 +377,7 @@ export class Room {
     if (this.members.size === 0) {
       this.clearTimer(this.saveTimer);
       this.saveTimer = null;
+      this.idleCountdown();
     }
   }
 
@@ -619,6 +658,7 @@ export class Room {
     this.clearTimer(ask.timer);
     if (error) ask.reject(error);
     else ask.resolve(value);
+    if (!this.members.size) this.idleCountdown();
   }
 
   /** Close the connections of everyone `which` picks with `code`; how many. */
