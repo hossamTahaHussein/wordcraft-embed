@@ -323,7 +323,7 @@ requests: `if (relay.handle(req, res)) return;` (it returns `false` for anything
 
 The relay can tell your server what happens in documents. Set `WEBHOOK_URL` and
 `WEBHOOK_SECRET` (or pass `webhook: { url, secret }` to `createRelay`). Each event is a POST
-of JSON `{ event, doc, at, …detail }`:
+of JSON `{ event, doc, at, delivery, …detail }`:
 
 | Event | Detail |
 |---|---|
@@ -335,7 +335,12 @@ of JSON `{ event, doc, at, …detail }`:
 | `restored` | `{ rev, version }` |
 
 Deliveries time out after 5 seconds and are tried up to three times. Each document's events
-arrive in order. They are signed: `X-WordCraft-Signature` is an HMAC-SHA256 of
+arrive in order. A delivery that timed out may still have reached you, so a retry can arrive
+twice: `delivery` (also sent as the `X-WordCraft-Delivery` header) is a UUID that is the same
+on every attempt of one delivery, so skip one you have already handled. While your server is
+down or slow, at most 100 deliveries wait per document; beyond that the oldest waiting ones
+are dropped (the relay logs a warning), so treat webhooks as notifications and ask the HTTP
+API for the current state when it matters. They are signed: `X-WordCraft-Signature` is an HMAC-SHA256 of
 `<X-WordCraft-Timestamp>.<body>` with your secret. Check it before trusting a delivery, on the
 raw body:
 
@@ -352,7 +357,8 @@ app.post('/hooks/wordcraft', express.raw({ type: 'application/json' }), (req, re
 ```
 
 `verifyWebhook(secret, headers, body, toleranceS = 300)` also refuses a delivery whose
-timestamp is more than five minutes away, so an old one can't be replayed.
+timestamp is more than five minutes away, so an old one can't be replayed. The `delivery` id
+is in the signed body; dedupe on that one rather than the (unsigned) header.
 
 ### Agents
 

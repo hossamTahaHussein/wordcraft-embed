@@ -54,7 +54,7 @@ test('an event is POSTed as signed JSON that verifyWebhook accepts', async () =>
   assert.equal(method, 'POST');
   assert.equal(headers['content-type'], 'application/json');
   assert.equal(headers['x-wordcraft-event'], 'joined');
-  assert.deepEqual({ ...json, at: undefined }, { event: 'joined', doc: 'doc-1', at: undefined, sub: 'u1', name: 'Ann', role: 'edit' });
+  assert.deepEqual({ ...json, at: undefined }, { event: 'joined', doc: 'doc-1', at: undefined, delivery: headers['x-wordcraft-delivery'], sub: 'u1', name: 'Ann', role: 'edit' });
   assert.ok(!Number.isNaN(Date.parse(json.at)));
   const ts = headers['x-wordcraft-timestamp'];
   assert.match(ts, /^\d+$/);
@@ -124,4 +124,82 @@ test('edited is debounced: at most one per 5 s per document, trailing, naming wh
   await tick();
   assert.deepEqual(sent.at(-1).people, ['Cy']);
   assert.equal(sent.length, 3);
+});
+
+test('every delivery has a stable id, the same on each retry, in a header and in the body', async () => {
+  const rx = await receiver((_, n) => (n === 1 ? 503 : 200));
+  const hooks = createWebhooks({ url: rx.url, secret: SECRET, retryMs: [10, 10], log: () => {} });
+  hooks.send('d', 'saved', { rev: 1 });
+  hooks.send('d', 'saved', { rev: 2 });
+  await until(() => rx.got.length === 3);
+  const ids = rx.got.map((g) => g.headers['x-wordcraft-delivery']);
+  for (const [i, g] of rx.got.entries()) {
+    assert.match(ids[i], /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    assert.equal(g.json.delivery, ids[i]);
+    assert.equal(verifyWebhook(SECRET, g.headers, g.body), true);
+  }
+  assert.equal(ids[0], ids[1], 'the retry is the same delivery');
+  assert.notEqual(ids[1], ids[2], 'the next event is another');
+  assert.equal(rx.got[0].body, rx.got[1].body, 'with the same body');
+  await rx.close();
+});
+
+/** A fetch whose answers wait until `release()`. */
+function heldFetch() {
+  const sent = [];
+  let waiting = [];
+  return {
+    sent,
+    fetch: (url, init) => {
+      sent.push(JSON.parse(init.body));
+      return new Promise((resolve) => waiting.push(() => resolve({ ok: true, status: 200 })));
+    },
+    async release() {
+      while (waiting.length) {
+        for (const r of waiting.splice(0)) r();
+        await tick(1);
+      }
+    },
+  };
+}
+
+test("a document's pending deliveries are bounded: the oldest are dropped, with one warning per burst", async () => {
+  const f = heldFetch();
+  const logs = [];
+  const hooks = createWebhooks({ url: 'http://x/hook', secret: SECRET, fetch: f.fetch, maxPending: 3, log: (m) => logs.push(m) });
+  for (let rev = 1; rev <= 6; rev++) hooks.send('d', 'saved', { rev });
+  hooks.send('other', 'saved', { rev: 1 });
+  await tick(1);
+  assert.equal(hooks.pending('d'), 3, 'the one being delivered is not pending');
+  assert.equal(logs.length, 1, logs.join('\n'));
+  assert.match(logs[0], /\bd\b.*dropping/);
+  await f.release();
+  assert.deepEqual(f.sent.filter((e) => e.doc === 'd').map((e) => e.rev), [1, 4, 5, 6]);
+  assert.deepEqual(f.sent.filter((e) => e.doc === 'other').map((e) => e.rev), [1], 'other documents are not affected');
+  // A later burst warns again.
+  for (let rev = 7; rev <= 11; rev++) hooks.send('d', 'saved', { rev });
+  await tick(1);
+  assert.equal(logs.filter((m) => /dropping/.test(m)).length, 2);
+  await f.release();
+});
+
+test("a document's state is let go once nothing is waiting for it", async () => {
+  const c = clock();
+  const f = heldFetch();
+  const hooks = createWebhooks({ url: 'http://x/hook', secret: SECRET, fetch: f.fetch, now: c.now, setTimer: c.setTimer, clearTimer: c.clearTimer });
+  hooks.send('a', 'joined', { sub: 'u', name: 'U', role: 'edit' });
+  hooks.edited('b', 1, 'Ann');
+  assert.equal(hooks.documents(), 2);
+  await f.release();
+  assert.equal(hooks.documents(), 1, "b's edited event is still to come");
+  c.advance(5000);
+  await tick(1);
+  assert.equal(hooks.documents(), 1, 'being delivered');
+  await f.release();
+  assert.equal(hooks.documents(), 0);
+  hooks.edited('b', 2, 'Bob');
+  c.advance(5000);
+  await f.release();
+  assert.deepEqual(f.sent.filter((e) => e.event === 'edited').map((e) => [e.rev, e.people]), [[1, ['Ann']], [2, ['Bob']]], 'a new state starts afresh');
+  assert.equal(hooks.documents(), 0);
 });
