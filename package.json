@@ -1,6 +1,6 @@
 {
   "name": "wordcraft-embed",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Embed the WordCraft word processor (open .docx, edit, save) in any web page",
   "type": "module",
   "main": "src/wordcraft-embed.js",
@@ -25,7 +25,7 @@
     "LICENSE-MIT",
     "LICENSE-APACHE"
   ],
-  "wordcraftVersion": "1.0.0",
+  "wordcraftVersion": "1.0.1",
   "scripts": {
     "fetch-editor": "node scripts/fetch-editor.mjs",
     "start": "node examples/server.mjs",
